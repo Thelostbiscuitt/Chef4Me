@@ -70,11 +70,8 @@ async def cmd_preferences(message: Message):
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-# -- Preference sub-handlers --
-
 @router.callback_query(F.data == "pref:dietary")
 async def pref_dietary_start(callback: CallbackQuery, state: FSMContext):
-    """Enter dietary-restriction selection mode."""
     await callback.answer()
     user_id = callback.from_user.id
     prefs = await db.get_preferences(user_id)
@@ -95,7 +92,6 @@ async def pref_dietary_start(callback: CallbackQuery, state: FSMContext):
     F.data.startswith("diet:"),
 )
 async def pref_dietary_toggle(callback: CallbackQuery, state: FSMContext):
-    """Toggle a dietary restriction in the multi-select flow."""
     value = callback.data.split(":", 1)[1]
 
     if value == "done":
@@ -132,7 +128,6 @@ async def pref_dietary_toggle(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "pref:cuisine")
 async def pref_cuisine_start(callback: CallbackQuery, state: FSMContext):
-    """Enter cuisine-preference selection mode."""
     await callback.answer()
     user_id = callback.from_user.id
     prefs = await db.get_preferences(user_id)
@@ -153,7 +148,6 @@ async def pref_cuisine_start(callback: CallbackQuery, state: FSMContext):
     F.data.startswith("cuisine_pref:"),
 )
 async def pref_cuisine_toggle(callback: CallbackQuery, state: FSMContext):
-    """Toggle a cuisine preference in the multi-select flow."""
     value = callback.data.split(":", 1)[1]
 
     if value == "done":
@@ -190,7 +184,6 @@ async def pref_cuisine_toggle(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "pref:skill")
 async def pref_skill_start(callback: CallbackQuery, state: FSMContext):
-    """Show skill-level picker."""
     await callback.answer()
     await state.set_state(SetPreferencesStates.waiting_for_skill_level)
     await callback.message.edit_text(
@@ -205,7 +198,6 @@ async def pref_skill_start(callback: CallbackQuery, state: FSMContext):
     F.data.startswith("skill:"),
 )
 async def pref_skill_save(callback: CallbackQuery, state: FSMContext):
-    """Save selected skill level."""
     skill = callback.data.split(":", 1)[1]
     await callback.answer()
     user_id = callback.from_user.id
@@ -218,7 +210,6 @@ async def pref_skill_save(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "pref:serving")
 async def pref_serving_start(callback: CallbackQuery, state: FSMContext):
-    """Ask user for serving size."""
     await callback.answer()
     await state.set_state(SetPreferencesStates.waiting_for_serving_size)
     await callback.message.edit_text(
@@ -230,7 +221,6 @@ async def pref_serving_start(callback: CallbackQuery, state: FSMContext):
 
 @router.message(SetPreferencesStates.waiting_for_serving_size)
 async def pref_serving_save(message: Message, state: FSMContext):
-    """Save the serving size entered by the user."""
     raw = message.text.strip()
     try:
         servings = int(raw)
@@ -250,7 +240,6 @@ async def pref_serving_save(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "pref:notifications")
 async def pref_toggle_notifications(callback: CallbackQuery):
-    """Toggle notification preferences on/off."""
     await callback.answer()
     user_id = callback.from_user.id
     prefs = await db.get_preferences(user_id)
@@ -270,7 +259,6 @@ async def pref_toggle_notifications(callback: CallbackQuery):
 
 @router.message(F.text == "/history")
 async def cmd_history(message: Message):
-    """Show recent cooked meals."""
     user_id = message.from_user.id
     meals = await db.get_recent_meals(user_id, limit=10)
     text = format_history(meals)
@@ -283,7 +271,6 @@ async def cmd_history(message: Message):
 
 @router.message(F.text == "/favorites")
 async def cmd_favorites(message: Message):
-    """Show favourited meals."""
     user_id = message.from_user.id
     favs = await db.get_favorites(user_id)
 
@@ -306,7 +293,6 @@ async def cmd_favorites(message: Message):
 
 @router.message(F.text == "/shopping")
 async def cmd_shopping(message: Message):
-    """Show current inventory and suggest adding missing items."""
     user_id = message.from_user.id
     ingredients = await db.get_ingredients(user_id)
 
@@ -387,7 +373,6 @@ async def cmd_shopping(message: Message):
 
 @router.message(F.text.startswith("/cook"))
 async def cmd_cook(message: Message):
-    """Quick-add a cooked meal to history."""
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         await message.answer(
@@ -431,7 +416,6 @@ async def cmd_cook(message: Message):
 
 @router.message(F.text == "/clear")
 async def cmd_clear(message: Message):
-    """Ask for confirmation before clearing inventory."""
     user_id = message.from_user.id
     count = await db.get_ingredient_count(user_id)
 
@@ -450,7 +434,6 @@ async def cmd_clear(message: Message):
 
 @router.callback_query(F.data == "confirm:clear_inventory")
 async def confirm_clear_inventory(callback: CallbackQuery):
-    """Execute inventory clear after user confirmation."""
     await callback.answer()
     user_id = callback.from_user.id
     removed = await db.clear_inventory(user_id)
@@ -469,11 +452,9 @@ async def confirm_clear_inventory(callback: CallbackQuery):
 
 @router.message(F.text.startswith("/rate"))
 async def cmd_rate(message: Message):
-    """Rate a meal via text command or show a picker of recent unrated meals."""
     parts = message.text.split()
     user_id = message.from_user.id
 
-    # -- Inline form: /rate <meal_id> <1-5> --
     if len(parts) >= 3:
         try:
             meal_id = int(parts[1])
@@ -491,7 +472,6 @@ async def cmd_rate(message: Message):
 
         await db.rate_meal(user_id, meal_id, rating)
 
-        # Auto-favourite if rating >= 4
         if rating >= 4:
             await db.toggle_favorite(user_id, meal_id)
 
@@ -505,7 +485,6 @@ async def cmd_rate(message: Message):
         )
         return
 
-    # -- No args: show a keyboard of recent unrated meals --
     meals = await db.get_recent_meals(user_id, limit=10)
     unrated = [m for m in meals if m.get("rating") is None]
 
@@ -535,11 +514,8 @@ async def cmd_rate(message: Message):
     )
 
 
-# -- Rating keyboard display --
-
 @router.callback_query(F.data.startswith("show_rating:"))
 async def show_rating_keyboard(callback: CallbackQuery):
-    """Display the 1-5 star rating keyboard for a specific meal."""
     await callback.answer()
     meal_id = int(callback.data.split(":")[1])
     await callback.message.edit_text(
@@ -553,12 +529,11 @@ async def show_rating_keyboard(callback: CallbackQuery):
 
 
 # ======================================================================
-#  Generic cancel handler (fallback for any pref FSM state)
+#  Generic cancel handler
 # ======================================================================
 
 @router.callback_query(F.data == "cancel", SetPreferencesStates)
 async def cancel_preferences_flow(callback: CallbackQuery, state: FSMContext):
-    """Cancel any in-progress preference-editing flow."""
     await callback.answer("Cancelled")
     await state.clear()
     await callback.message.edit_text(
