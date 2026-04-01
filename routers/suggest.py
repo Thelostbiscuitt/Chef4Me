@@ -34,7 +34,6 @@ async def cmd_suggest(message: Message, state: FSMContext):
     """Suggest meals based on user's ingredients and preferences."""
     user_id = message.from_user.id
 
-    # Parse optional filters: /suggest [cuisine] [diet]
     parts = message.text.strip().split()
     arg_cuisine = None
     arg_diet = None
@@ -49,7 +48,6 @@ async def cmd_suggest(message: Message, state: FSMContext):
         else:
             arg_cuisine = candidate
 
-    # -- Guard: user must have ingredients --
     ingredients, seasonings = await db.get_ingredients_as_lists(user_id)
     if not ingredients and not seasonings:
         await message.answer(
@@ -58,7 +56,6 @@ async def cmd_suggest(message: Message, state: FSMContext):
         )
         return
 
-    # -- Fetch preferences --
     prefs = await db.get_preferences(user_id)
 
     dietary_restrictions = list(prefs.get("dietary_restrictions") or [])
@@ -67,13 +64,11 @@ async def cmd_suggest(message: Message, state: FSMContext):
     serving_size = prefs.get("serving_size", 2)
     preferred_cuisines = list(prefs.get("preferred_cuisines") or [])
 
-    # Apply inline command overrides
     if arg_cuisine:
         preferred_cuisines = [arg_cuisine]
     if arg_diet and arg_diet not in dietary_restrictions:
         dietary_restrictions.append(arg_diet)
 
-    # -- Get recent cuisines to avoid repeating --
     avoid_cuisines = await db.get_recent_cuisines(user_id, limit=20)
     if preferred_cuisines:
         avoid_cuisines = [
@@ -81,12 +76,10 @@ async def cmd_suggest(message: Message, state: FSMContext):
             if c.lower() not in [p.lower() for p in preferred_cuisines]
         ]
 
-    # -- UX: show thinking indicator --
     thinking_msg = await message.answer(
         "Thinking... Let me find something delicious for you!"
     )
 
-    # -- Call Gemini --
     try:
         response = await gemini.suggest_meals(
             ingredients=ingredients,
@@ -124,14 +117,12 @@ async def cmd_suggest(message: Message, state: FSMContext):
             )
         return
 
-    # -- Persist in FSM --
     suggestions_data = [s.model_dump() for s in response.suggestions]
     await state.update_data(
         suggestions=suggestions_data,
         current_offset=0,
     )
 
-    # -- Send first batch --
     first_batch = suggestions_data[:BATCH_SIZE]
     text = _build_suggestions_list_text(first_batch, 0)
     keyboard = meal_suggestion_keyboard(first_batch, offset=0)
@@ -221,7 +212,6 @@ async def cb_suggest_more(callback: CallbackQuery, state: FSMContext):
             )
         return
 
-    # -- All cached suggestions exhausted -- ask Gemini for fresh ones --
     thinking_text = "Fresh ideas coming up..."
 
     try:
@@ -313,7 +303,6 @@ async def cb_cooked(callback: CallbackQuery, state: FSMContext):
         if ing.get("have")
     ]
 
-    # -- Persist to DB --
     meal_id = await db.add_cooked_meal(
         user_id=user_id,
         recipe_name=recipe_name,
@@ -321,11 +310,9 @@ async def cb_cooked(callback: CallbackQuery, state: FSMContext):
         ingredients_used=ingredient_names,
     )
 
-    # -- Consume ingredients the user had --
     if ingredient_names:
         await db.consume_ingredients(user_id, ingredient_names)
 
-    # -- Sync to Notion if available --
     if notion and getattr(notion, "is_available", False):
         try:
             notion_db_id = None
@@ -340,7 +327,6 @@ async def cb_cooked(callback: CallbackQuery, state: FSMContext):
         except Exception as exc:
             logger.warning("Notion sync failed for cooked meal: %s", exc)
 
-    # -- Confirmation --
     confirm_text = (
         f"Great choice! You cooked *{recipe_name}*!\n\n"
         f"Consumed ingredients: "
@@ -380,7 +366,6 @@ async def cb_rate(callback: CallbackQuery):
 
     await db.rate_meal(user_id=user_id, meal_id=meal_id, rating=rating)
 
-    # Auto-favourite if rating >= 4
     if rating >= 4:
         await db.toggle_favorite(user_id, meal_id)
 
