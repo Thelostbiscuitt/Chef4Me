@@ -3,9 +3,9 @@
 Intelligent kitchen assistant that manages ingredients, tracks expiry,
 and suggests meals from diverse global cuisines using Google Gemini AI.
 """
-import asyncio
 import logging
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -39,7 +39,6 @@ async def on_startup(bot: Bot):
         return
 
     # CRITICAL: Delete any leftover webhook from previous deployments.
-    # A stale webhook causes TelegramConflictError when we try to poll.
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Cleared any existing webhook and dropped pending updates.")
@@ -108,8 +107,8 @@ async def on_shutdown(bot: Bot):
     logger.info("Cleanup complete. Goodbye!")
 
 
-async def main():
-    """Async entry point -- runs the bot with conflict-error recovery."""
+def main():
+    """Entry point -- sets up dispatcher and starts polling."""
     if not config.BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN is not set!")
         print("Get one from @BotFather: https://t.me/BotFather")
@@ -149,14 +148,11 @@ async def main():
             "This is normal during Render redeploy -- the old instance will "
             "stop shortly. If this persists, wait 2-3 minutes then redeploy."
         )
-        # Wait for the old instance to die, then retry once
-        await asyncio.sleep(5)
+        time.sleep(5)
         try:
             dp.run_polling(bot, drop_pending_updates=True)
         except TelegramConflictError:
-            logger.error(
-                "TelegramConflictError persists after retry. Exiting."
-            )
+            logger.error("TelegramConflictError persists after retry. Exiting.")
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
     except Exception as e:
@@ -164,4 +160,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
