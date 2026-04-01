@@ -1,7 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import Message
 
-import state
+import state as app_state
 
 router = Router()
 
@@ -43,12 +43,12 @@ HELP_TEXT = """\
 from aiogram.fsm.context import FSMContext
 
 @router.message(F.text == "/start")
-async def cmd_start(message: Message, fsm_state: FSMContext):
+async def cmd_start(message: Message, state: FSMContext):
     # Reset any active FSM state
-    await fsm_state.clear()
+    await state.clear()
 
     # Register the user in the database
-    await state.db.register_user(
+    await app_state.db.register_user(
         user_id=message.from_user.id,
         username=message.from_user.username,
         first_name=message.from_user.first_name,
