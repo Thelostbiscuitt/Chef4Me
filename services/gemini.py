@@ -24,7 +24,14 @@ Important rules:
 - Always suggest meals that are realistically achievable with the listed ingredients.
 - Include both simple and moderately complex options.
 - NEVER suggest a recipe where more than 20% of key ingredients are missing.
-- Respond ONLY with valid JSON matching the requested schema."""
+- Respond ONLY with valid JSON matching the requested schema.
+
+RECIPE DETAIL RULES — these are non-negotiable:
+- Every ingredient MUST have an exact measurement with unit (e.g. 500g, 2 tbsp, 1 tsp, 3 cloves). Never use vague amounts like "some", "a handful", or "to taste" alone.
+- Every recipe MUST include a realistic prep_time_minutes AND cook_time_minutes as separate values.
+- Every instruction step must be specific and actionable — include cooking temperature (e.g. medium-high heat, 180°C/350°F), duration (e.g. cook for 5-7 minutes), and a sensory cue so the user knows when it's done (e.g. until golden brown, until juices run clear, until fragrant).
+- Steps must be granular — never combine multiple actions into one step. Aim for 8-12 steps minimum for any non-trivial recipe.
+- Always include at least 3 tips covering: a substitution, a storage instruction, and a serving suggestion."""
 
 SUGGEST_PROMPT_TEMPLATE = """Here are my available ingredients:
 {ingredients}
@@ -44,8 +51,8 @@ Please suggest exactly {count} meals I can make. Each should be from a different
 - cuisine: the ethnic cuisine category
 - description: 2-3 sentences about the dish and why it works with these ingredients
 - difficulty: 1 (beginner) to 5 (expert)
-- cook_time_minutes: realistic cooking time
-- ingredients: list of required ingredients with "have" (true if user has it, false if missing)
+- cook_time_minutes: realistic cooking time excluding prep
+- ingredients: list of required ingredients with exact measurement (e.g. "500g chicken breast") and "have" (true if user has it, false if missing)
 - match_percentage: what fraction of required ingredients the user already has (0-100)
 - calories_per_serving: estimated if possible (null if not)
 - step_count: approximate number of cooking steps"""
@@ -59,15 +66,32 @@ My dietary restrictions: {restrictions}
 My skill level: {skill_level}
 Servings: {servings}
 
-Please provide a complete, detailed recipe with:
-- name and cuisine
-- description
-- difficulty (1-5) and cook time
-- prep time, servings
-- all ingredients needed (mark have=true if I have them, false if I need to get them)
-- detailed step-by-step instructions (each step as a separate string in the steps array)
-- helpful tips specific to this recipe
-- estimated calories per serving"""
+Provide a COMPLETE, DETAILED recipe. You must follow these rules strictly:
+
+INGREDIENTS:
+- Every single ingredient must have an exact quantity and unit (e.g. "500g boneless chicken breast", "2 tbsp olive oil", "3 garlic cloves minced", "1 tsp salt").
+- Never write vague amounts. Always be specific.
+- Mark have=true if the ingredient is in my available list, have=false if I need to buy it.
+
+TIMING:
+- prep_time_minutes: time spent chopping, marinating, mixing before any heat is applied.
+- cook_time_minutes: active time on heat or in oven.
+- These must be separate, realistic values — not combined.
+
+INSTRUCTIONS (steps array):
+- Minimum 8 steps for any non-trivial recipe, 12+ for complex dishes.
+- Each step must be a single focused action.
+- Include exact heat level (low / medium / medium-high / high / 180°C / 350°F etc.).
+- Include exact duration ("cook for 5-7 minutes", "simmer for 20 minutes", "rest for 10 minutes").
+- Include a sensory or visual cue for doneness ("until golden brown", "until the onions are translucent", "until the sauce coats the back of a spoon").
+- Never combine multiple actions in one step.
+
+TIPS (tips array — minimum 3):
+- One substitution tip (e.g. what to use if a key ingredient is unavailable).
+- One storage/make-ahead tip.
+- One serving suggestion (what to pair the dish with).
+
+Respond ONLY with valid JSON matching the schema."""
 
 
 class GeminiService:
@@ -182,7 +206,7 @@ class GeminiService:
                 "description": {"type": "string"},
                 "difficulty": {"type": "integer", "minimum": 1, "maximum": 5},
                 "cook_time_minutes": {"type": "integer", "minimum": 1},
-                "prep_time_minutes": {"type": ["integer", "null"]},
+                "prep_time_minutes": {"type": "integer", "minimum": 0},
                 "servings": {"type": "integer", "minimum": 1},
                 "ingredients": {
                     "type": "array",
@@ -195,12 +219,12 @@ class GeminiService:
                         "required": ["name", "have"]
                     }
                 },
-                "steps": {"type": "array", "items": {"type": "string"}},
-                "tips": {"type": "array", "items": {"type": "string"}},
+                "steps": {"type": "array", "items": {"type": "string"}, "minItems": 8},
+                "tips": {"type": "array", "items": {"type": "string"}, "minItems": 3},
                 "calories_per_serving": {"type": ["integer", "null"]}
             },
             "required": ["name", "cuisine", "description", "difficulty",
-                         "cook_time_minutes", "ingredients", "steps"]
+                         "cook_time_minutes", "prep_time_minutes", "ingredients", "steps", "tips"]
         }
 
         try:
@@ -247,7 +271,7 @@ Return a JSON array of objects with these fields. Only return valid JSON."""
         gen_config = GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             temperature=0.7,
-            max_output_tokens=4096,
+            max_output_tokens=8192,
         )
         if response_schema:
             gen_config.response_mime_type = "application/json"
@@ -260,7 +284,6 @@ Return a JSON array of objects with these fields. Only return valid JSON."""
                 config=gen_config,
             )
             text = response.text.strip()
-            # Handle markdown code blocks in response
             if text.startswith("```"):
                 text = text.split("\n", 1)[1] if "\n" in text else text[3:]
                 text = text.rsplit("```", 1)[0] if "```" in text else text
