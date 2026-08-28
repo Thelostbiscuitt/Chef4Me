@@ -1,8 +1,11 @@
-"""Inventory router — handles /add, /add bulk, /remove, /inventory, /expiry."""
+"""Inventory router — handles /add, /add bulk, /remove, /inventory, /expiry,
+and photo/OCR-based ingredient extraction."""
+import io
 import logging
 from datetime import date
 
 from aiogram import Router, F
+from aiogram.filters import StateFilter
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
@@ -289,43 +292,8 @@ async def on_bulk_input(message: Message, state: FSMContext):
         )
         return
 
-    # Resolve any natural-language expiry hints ("expires in 3 days") into
-    # real ISO dates the database understands. Unparseable hints are dropped
-    # with a warning rather than failing the whole add.
-    for item in parsed:
-        item["expiry_date"] = None
-        hint = (item.pop("expiry_hint", None) or "").strip()
-        if hint:
-            try:
-                item["expiry_date"] = parse_expiry_input(hint)
-            except ValueError:
-                logger.warning(
-                    "Unparseable expiry hint %r for ingredient %r — ignoring.",
-                    hint, item.get("name"),
-                )
-
-    # Store parsed results in FSM for confirmation
-    await state.update_data(bulk_parsed=parsed)
-
-    # Build a summary
-    lines = ["📋 *Parsed Ingredients:*\n"]
-    for i, item in enumerate(parsed, 1):
-        expiry_suffix = f" ⏰ {item['expiry_date']}" if item.get("expiry_date") else ""
-        lines.append(
-            f"{i}. {item.get('name', '?')} — "
-            f"{item.get('quantity', '?')} {item.get('unit', '?')} "
-            f"[{item.get('category', 'other')}]{expiry_suffix}"
-        )
-    lines.append(f"\n✅ Total: {len(parsed)} items")
-    lines.append("\nAdd all of these to your inventory?")
-
-    from utils.keyboards import confirm_keyboard
-
-    await processing_msg.edit_text(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=confirm_keyboard("bulk_add"),
-    )
+    _resolve_expiry_hints(parsed)
+    await _present_parsed_for_confirmation(message, state, parsed, processing_msg)
 
 
 # ── Bulk add confirmation ──────────────────────────────────────────────────
@@ -604,3 +572,103 @@ async def on_close(callback: CallbackQuery):
             await callback.message.edit_text("Closed.")
         except TelegramBadRequest:
             pass
+
+
+# ── Shared helpers for AI-parsed (text bulk / photo) adds ─────────────────
+
+def _resolve_expiry_hints(parsed: list[dict]) -> list[dict]:
+    """Convert natural-language expiry hints into ISO dates (in place).
+    Unparseable hints are dropped with a warning rather than failing the add."""
+    for item in parsed:
+        item["expiry_date"] = None
+        hint = (item.pop("expiry_hint", None) or "").strip()
+        if hint:
+            try:
+                item["expiry_date"] = parse_expiry_input(hint)
+            except ValueError:
+                logger.warning(
+                    "Unparseable expiry hint %r for ingredient %r — ignoring.",
+                    hint, item.get("name"),
+                )
+    return parsed
+
+
+async def _present_parsed_for_confirmation(
+    message: Message, state: FSMContext, parsed: list[dict], processing_msg: Message
+):
+    """Store parsed items in FSM and show the shared confirmation card."""
+    await state.update_data(bulk_parsed=parsed)
+
+    lines = ["📋 *Parsed Ingredients:*\n"]
+    for i, item in enumerate(parsed, 1):
+        expiry_suffix = f" ⏰ {item['expiry_date']}" if item.get("expiry_date") else ""
+        lines.append(
+            f"{i}. {item.get('name', '?')} — "
+            f"{item.get('quantity', '?')} {item.get('unit', '?')} "
+            f"[{item.get('category', 'other')}]{expiry_suffix}"
+        )
+    lines.append(f"\n✅ Total: {len(parsed)} items")
+    lines.append("\nAdd all of these to your inventory?")
+
+    from utils.keyboards import confirm_keyboard
+
+    await processing_msg.edit_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=confirm_keyboard("bulk_add"),
+    )
+
+
+# ── Photo / OCR add ────────────────────────────────────────────────────────
+IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+
+
+@router.message(StateFilter(None), F.photo | F.document)
+async def on_photo_upload(message: Message, state: FSMContext):
+    """OCR/vision: send a receipt, shopping list, or fridge/pantry photo and
+    Gemini extracts the ingredients into the same confirm-and-save flow."""
+    if gemini is None:
+        await message.answer(
+            "⚠️ AI service is not available right now. Please use /add for individual items."
+        )
+        return
+
+    if message.photo:
+        # Telegram photos are always JPEG; pick the largest resolution.
+        file_id = message.photo[-1].file_id
+        mime_type = "image/jpeg"
+    else:
+        doc = message.document
+        mime = (doc.mime_type or "").lower()
+        if mime not in IMAGE_MIME_TYPES:
+            await message.answer(
+                "That file isn't an image I can read — send a JPEG, PNG, WEBP or HEIC photo."
+            )
+            return
+        file_id = doc.file_id
+        mime_type = mime
+
+    processing_msg = await message.answer("📸 Reading your image with AI…")
+
+    try:
+        image_buffer = io.BytesIO()
+        await message.bot.download(file=file_id, destination=image_buffer)
+    except Exception:
+        logger.exception("Failed to download photo from Telegram")
+        await processing_msg.edit_text(
+            "❌ Couldn't download that image. Please try sending it again."
+        )
+        return
+
+    parsed = await gemini.extract_ingredients_from_image(
+        image_buffer.getvalue(), mime_type
+    )
+    if not parsed:
+        await processing_msg.edit_text(
+            "❌ I couldn't find any ingredients in that image.\n"
+            "Try a clearer photo, or add items by text with /add."
+        )
+        return
+
+    _resolve_expiry_hints(parsed)
+    await _present_parsed_for_confirmation(message, state, parsed, processing_msg)

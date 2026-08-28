@@ -274,6 +274,46 @@ Return a JSON array of objects with these fields. Only return valid JSON."""
             logger.error(f"Failed to parse ingredients from text: {e}")
             return []
 
+    async def extract_ingredients_from_image(
+        self, image_bytes: bytes, mime_type: str = "image/jpeg"
+    ) -> list[dict]:
+        """Vision/OCR: extract ingredients from a photo (receipt, shopping list,
+        fridge or pantry shot, food packaging)."""
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+        prompt = """Look at this image and extract every kitchen ingredient you can
+identify. The image may be a grocery receipt, a handwritten or printed shopping
+list, a fridge/pantry photo, or food packaging. For each ingredient extract:
+- name: the ingredient name (normalized, singular form)
+- quantity: the amount as a number. Default to 1 when unspecified or unreadable.
+- unit: one of g, kg, ml, L, pcs, cups, tbsp, tsp, lb, oz, bunches, cloves, whole.
+  Use pcs for countable items.
+- category: one of protein, vegetable, grain, dairy, spice, sauce, oil, fruit, beverage, other
+- expiry_hint: ONLY if the image shows an expiry/best-before/use-by date or a
+  clearly visible freshness context. Otherwise omit this field entirely.
+
+Only include actual food ingredients - skip prices, totals, barcodes, store
+names and non-food items. Return a JSON array of objects with these fields.
+Only return valid JSON."""
+        schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "unit": {"type": "string"},
+                    "category": {"type": "string"},
+                    "expiry_hint": {"type": "string"},
+                },
+                "required": ["name", "quantity", "unit", "category"]
+            }
+        }
+        try:
+            return await self._generate([image_part, prompt], schema)
+        except Exception as e:
+            logger.error(f"Failed to extract ingredients from image: {e}")
+            return []
+
     async def _generate(self, prompt: str, response_schema: dict = None) -> dict:
         """Call the Gemini API with structured output support."""
         gen_config = GenerateContentConfig(
