@@ -22,7 +22,7 @@ AI-Powered Ingredient Management & Meal Suggestions from 40+ World Cuisines
   - [Notion Integration](#notion-integration)
 - [Setup & Deployment](#setup--deployment)
   - [Prerequisites](#prerequisites)
-  - [Deploying on Render](#deploying-on-render-background-worker)
+  - [Deploying on a VPS](#deploying-on-a-vps-systemd--long-polling)
   - [Running Locally](#running-locally)
 - [Environment Variables](#environment-variables)
 - [Project Structure](#project-structure)
@@ -127,19 +127,52 @@ After the bot presents meal suggestions, you can interact with the results using
 2. A **Google Gemini API Key** – Obtain a free API key from [Google AI Studio](https://aistudio.google.com/) (supports the free tier).
 3. A cloud hosting account (Render recommended) or a local machine with Python 3.12 and Docker.
 
-### Deploying on Render (Background Worker)
+### Deploying on a VPS (systemd + long polling)
 
-Render is the recommended deployment platform for this bot. It provides a free tier for background workers, automatic HTTPS, and straightforward environment variable management.
+The bot is a long-running Python process, so it belongs on a Virtual
+Private Server (e.g. an Oracle Cloud VPS), not on a serverless platform
+such as Vercel. The recommended setup uses **long polling** managed by
+**systemd**: the bot makes outbound HTTPS calls to Telegram only, so you
+need no open inbound ports, no domain, no TLS certificate and no reverse
+proxy. Nothing in the Oracle Cloud security list needs to change.
 
-1. Create a new **Web Service** or **Background Worker** on Render and connect your Git repository (or upload the provided ZIP file directly).
-2. Set the build type to **Docker** and ensure the `Dockerfile` is in the root of your project.
-3. Select **Background Worker** as the instance type (not Web Service). The bot runs as a long-polling process, not an HTTP server.
-4. Add the following environment variables in the Render environment settings panel:
-   - `TELEGRAM_BOT_TOKEN` – your bot token from @BotFather
-   - `GEMINI_API_KEY` – your Google AI Studio API key
-   - (Optional) `NOTION_TOKEN`, `NOTION_INGREDIENTS_DB`, `NOTION_RECIPES_DB` if you want Notion sync.
-5. Deploy. The bot will start polling automatically. On first deploy, it may take 2–3 minutes for the Docker image to build and the bot to come online.
-6. After deploying, send `/start` to your bot in Telegram to verify it is working.
+Full step-by-step instructions: see **[deploy/README.md](deploy/README.md)**.
+Summary:
+
+1. Install Python 3.12+ and git on the VPS.
+2. Place the project in `/opt/chef4me` and create a venv:
+   ```bash
+   cd /opt/chef4me
+   python3 -m venv venv
+   venv/bin/pip install -r requirements.txt
+   ```
+3. Create `/opt/chef4me/.env` with `TELEGRAM_BOT_TOKEN` and
+   `GEMINI_API_KEY` (see `env.example`). Leave `WEBHOOK_BASE_URL` unset —
+   the bot then runs in long-polling mode automatically.
+4. Install and start the systemd service:
+   ```bash
+   sudo cp deploy/chef4me.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now chef4me
+   ```
+5. Watch the logs (`journalctl -u chef4me -f`) and send `/start` to the
+   bot in Telegram to verify it is working.
+
+#### Why not Vercel?
+
+Vercel's Python runtime executes short-lived serverless functions and
+requires an ASGI/WSGI entrypoint it can auto-detect (`app.py`,
+`main.py`, ...) or one declared as `tool.vercel.entrypoint` in
+`pyproject.toml`. This project's entrypoint is `bot.py`, which is why
+Vercel reports `Error: No python entrypoint found`. Renaming the file
+would not fix anything: the bot is a persistent aiohttp/aiogram process
+with an in-process APScheduler (proactive expiry alerts) and a local
+SQLite database — none of which fit the serverless model. Use a VPS
+(this guide) or a long-running container platform instead. The included
+`Dockerfile` and `Procfile` are for container-based hosting (e.g. Render
+Web Service), where the bot should run in webhook mode by setting
+`WEBHOOK_BASE_URL` and `WEBHOOK_SECRET`.
+
 
 ### Running Locally
 
@@ -150,3 +183,9 @@ You can run the bot locally for development or testing. Ensure you have Python 3
 3. Install dependencies:
    ```bash
    pip install -r requirements.txt
+   ```
+4. Run the bot:
+   ```bash
+   python bot.py
+   ```
+The bot will start polling for updates from Telegram. Send `/start` to your bot to begin using it. Press `Ctrl+C` to stop the bot gracefully.

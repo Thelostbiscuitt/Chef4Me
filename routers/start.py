@@ -10,13 +10,15 @@ HELP_TEXT = """\
 
 🥕 <b>Inventory Management</b>
 /add — Add an ingredient (interactive flow)
-/add bulk — Add multiple ingredients at once
+/add chicken, rice, eggs — Add a whole list at once (AI-parsed)
+/add bulk — Bulk-add mode: send a sentence or list, however you like
 /remove — Remove an ingredient from inventory
 /inventory — View your current ingredients
 /clear — Clear all ingredients
 
 ⏰ <b>Expiry Tracking</b>
 /expiry — Show ingredients expiring soon
+💡 Expiry accepts natural dates: <i>tomorrow</i>, <i>in 3 days</i>, <i>next week</i>, or DD/MM
 
 🍽️ <b>Meal Suggestions</b>
 /suggest — Get AI-powered meal suggestions

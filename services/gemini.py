@@ -236,11 +236,18 @@ class GeminiService:
 
     async def identify_ingredients_from_text(self, text: str) -> list[dict]:
         """Parse a text list of ingredients into structured data."""
-        prompt = f"""Parse this list of ingredients into structured data. For each item, extract:
+        prompt = f"""Parse this text into a list of kitchen ingredients. The text may be a
+plain list, a shopping list, or a casual sentence (e.g. "I bought 2kg of
+chicken, a dozen eggs and some rice yesterday"). For each ingredient extract:
 - name: the ingredient name (normalized, singular form)
-- quantity: the amount (number)
-- unit: the unit (g, ml, pcs, cups, tbsp, tsp, kg, lb, bunches, cloves, whole, L)
-- category: one of: protein, vegetable, grain, dairy, spice, sauce, oil, fruit, beverage, other
+- quantity: the amount as a number. Default to 1 when unspecified.
+  "a dozen" = 12, "a couple" = 2, "half a litre" = 0.5, "a pinch" = 1.
+- unit: one of g, kg, ml, L, pcs, cups, tbsp, tsp, lb, oz, bunches, cloves, whole.
+  Use pcs for countable items.
+- category: one of protein, vegetable, grain, dairy, spice, sauce, oil, fruit, beverage, other
+- expiry_hint: ONLY if the text mentions expiry/freshness for that item
+  (e.g. "expires in 3 days", "going off tomorrow", "use by friday").
+  Keep the hint in natural English. Otherwise omit this field entirely.
 
 Input text: "{text}"
 
@@ -254,7 +261,8 @@ Return a JSON array of objects with these fields. Only return valid JSON."""
                     "name": {"type": "string"},
                     "quantity": {"type": "number"},
                     "unit": {"type": "string"},
-                    "category": {"type": "string"}
+                    "category": {"type": "string"},
+                    "expiry_hint": {"type": "string"},
                 },
                 "required": ["name", "quantity", "unit", "category"]
             }

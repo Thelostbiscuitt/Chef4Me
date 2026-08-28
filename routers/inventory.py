@@ -18,14 +18,15 @@ from utils.keyboards import (
     expiry_keyboard,
 )
 from utils.normalize import normalize_name
+from utils.dates import parse_expiry_input
 
 logger = logging.getLogger(__name__)
 
 router = Router()
 
 # ── Module-level service references ──────────────────────────────────────────
-# These are set during bot initialisation (e.g. in bot.py):
-#   from routers.inventory import inventory as inventory_router
+# These are set during bot initialisation in bot.py, which imports this MODULE
+# (import routers.inventory as inventory_router) and assigns module globals:
 #   inventory_router.db = database_service
 #   inventory_router.gemini = gemini_service
 db: DatabaseService = None  # type: ignore[assignment]
@@ -60,7 +61,21 @@ async def cmd_add(message: Message, state: FSMContext):
     ingredient_input = parts[1].strip() if len(parts) > 1 else ""
 
     if ingredient_input:
-        # Ingredient name provided directly — store and ask for quantity
+        # Lists (commas/newlines) and chatty sentences go straight to the
+        # AI bulk parser — one command handles both one-by-one and lists.
+        lowered = ingredient_input.lower()
+        looks_like_list = (
+            "," in ingredient_input
+            or "\n" in ingredient_input
+            or len(ingredient_input.split()) >= 5
+            or lowered.startswith(("i bought", "bought", "i have", "i got", "we bought", "got "))
+        )
+        if looks_like_list:
+            await state.set_state(BulkAddStates.waiting_for_bulk_input)
+            await on_bulk_input(message, state)
+            return
+
+        # Single ingredient — store the name and ask for quantity
         normalized = normalize_name(ingredient_input)
         await state.set_state(AddIngredientStates.waiting_for_quantity)
         await state.update_data(ingredient_name=normalized)
@@ -183,25 +198,14 @@ async def on_expiry_date(message: Message, state: FSMContext):
     expiry_date = None
 
     if raw not in ("skip", "-", "none", "n/a", "/"):
-        # Try to parse DD/MM format
+        # Accepts natural phrases (today/tomorrow/in 3 days/next week)
+        # as well as DD/MM — see utils/dates.py.
         try:
-            parts = raw.replace("/", " ").replace("-", " ").replace(".", " ").split()
-            if len(parts) >= 2:
-                day, month = int(parts[0]), int(parts[1])
-                # Infer year — prefer the next occurrence of this date
-                today = date.today()
-                try:
-                    expiry = date(today.year, month, day)
-                    if expiry < today:
-                        expiry = date(today.year + 1, month, day)
-                except ValueError:
-                    # Invalid date (e.g. Feb 30) — keep None
-                    expiry = None
-                if expiry:
-                    expiry_date = expiry.isoformat()
-        except (ValueError, IndexError):
+            expiry_date = parse_expiry_input(raw)
+        except ValueError:
             await message.answer(
-                "Couldn't parse that date. Use `DD/MM` format or type `skip`.",
+                "Couldn't parse that. Try `DD/MM`, or phrases like "
+                "`tomorrow`, `in 3 days`, `next week` — or type `skip`.",
                 parse_mode="Markdown",
             )
             return
@@ -248,10 +252,12 @@ async def _start_bulk_add(message: Message, state: FSMContext):
     await state.set_state(BulkAddStates.waiting_for_bulk_input)
     await message.answer(
         "📦 *Bulk Add Mode*\n\n"
-        "Send me a list of ingredients. You can separate them with:\n"
-        "• Commas: `chicken, rice, tomatoes`\n"
-        "• Newlines (each ingredient on a new line)\n\n"
-        "Include quantities if you like: `2 chicken breast, 500g rice`\n\n"
+        "Just tell me what you have — any format works:\n"
+        "• A list: `chicken, rice, tomatoes`\n"
+        "• With amounts: `2 chicken breast, 500g rice, a dozen eggs`\n"
+        "• A sentence: `I bought 2kg of chicken and some milk today`\n"
+        "• With expiry: `yogurt 500g expires in 3 days`\n\n"
+        "I'll parse it all with AI and confirm before saving.\n"
         "Type /cancel to abort.",
         parse_mode="Markdown",
     )
@@ -283,16 +289,32 @@ async def on_bulk_input(message: Message, state: FSMContext):
         )
         return
 
+    # Resolve any natural-language expiry hints ("expires in 3 days") into
+    # real ISO dates the database understands. Unparseable hints are dropped
+    # with a warning rather than failing the whole add.
+    for item in parsed:
+        item["expiry_date"] = None
+        hint = (item.pop("expiry_hint", None) or "").strip()
+        if hint:
+            try:
+                item["expiry_date"] = parse_expiry_input(hint)
+            except ValueError:
+                logger.warning(
+                    "Unparseable expiry hint %r for ingredient %r — ignoring.",
+                    hint, item.get("name"),
+                )
+
     # Store parsed results in FSM for confirmation
     await state.update_data(bulk_parsed=parsed)
 
     # Build a summary
     lines = ["📋 *Parsed Ingredients:*\n"]
     for i, item in enumerate(parsed, 1):
+        expiry_suffix = f" ⏰ {item['expiry_date']}" if item.get("expiry_date") else ""
         lines.append(
             f"{i}. {item.get('name', '?')} — "
             f"{item.get('quantity', '?')} {item.get('unit', '?')} "
-            f"[{item.get('category', 'other')}]"
+            f"[{item.get('category', 'other')}]{expiry_suffix}"
         )
     lines.append(f"\n✅ Total: {len(parsed)} items")
     lines.append("\nAdd all of these to your inventory?")

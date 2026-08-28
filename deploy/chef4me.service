@@ -1,0 +1,33 @@
+# systemd unit for the Chef4Me Telegram bot (long-polling worker).
+#
+# Install:
+#   sudo cp deploy/chef4me.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now chef4me
+#
+# Adjust User= and the paths below if your install lives elsewhere.
+
+[Unit]
+Description=Chef4Me Telegram Meal Bot (long polling)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chef4me
+Group=chef4me
+WorkingDirectory=/opt/chef4me
+ExecStart=/opt/chef4me/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening (safe for this workload: outbound Telegram/Gemini/Notion only)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/chef4me
+
+[Install]
+WantedBy=multi-user.target

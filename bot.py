@@ -91,10 +91,15 @@ async def on_startup(bot: Bot) -> None:
     state.scheduler = scheduler_service
 
     # ── Wire services into each router's module-level refs ────────────────────
-    from routers.inventory import router as inventory_router
-    from routers.suggest import router as suggest_router
-    from routers.planner import router as planner_router
-    from routers.notion_router import router as notion_router
+    # NOTE: import the MODULES, not their `router` objects. Handlers read these
+    # as module globals (e.g. `db` in routers/inventory.py), so assignments must
+    # land on the module itself: `routers.inventory.db = ...`. Setting
+    # `router_object.db = ...` does NOT update the module namespace the
+    # handlers resolve their globals from.
+    import routers.inventory as inventory_router
+    import routers.suggest as suggest_router
+    import routers.planner as planner_router
+    import routers.notion_router as notion_router
 
     inventory_router.db = db_service
     inventory_router.gemini = gemini_service
