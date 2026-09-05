@@ -3,8 +3,14 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class AddIngredientStates(StatesGroup):
-    """States for the add ingredient flow."""
+    """States for the add ingredient flow.
+
+    waiting_for_quantity — how many items/packages were bought (the count).
+    waiting_for_amount   — how much is in EACH one (measurement + unit).
+    waiting_for_unit     — fallback unit keyboard when an amount had no unit.
+    """
     waiting_for_quantity = State()
+    waiting_for_amount = State()
     waiting_for_unit = State()
     waiting_for_category = State()
     waiting_for_expiry = State()

@@ -71,7 +71,7 @@ The bot provides a comprehensive set of commands organized into six categories. 
 |----------------------|-------------------------------------------------------------------------------------------------|------------------------|
 | **/start**           | Initialize the bot and register your account. Resets any active input flow.                     | /start                 |
 | **/help**            | Display the full list of available commands with usage tips.                                    | /help                  |
-| **/add [name]**      | Start the ingredient addition flow. Optionally provide a name to skip the first step. The bot will then prompt for quantity, unit, category, and expiry date through an interactive guided process. | /add chicken breast    |
+| **/add [name]**      | Start the ingredient addition flow. Optionally provide a name to skip the first step. The bot then asks how many items you bought and how much is in each one (e.g. `20` × `625 ml` = `12500 ml`), followed by category and expiry date. | /add chicken breast    |
 | **/add bulk**        | Enter bulk-add mode. Send a freeform list of ingredients (comma or newline separated) and the AI will parse names, quantities, units, and categories automatically. | /add bulk              |
 | **/remove**          | Display an interactive keyboard of your current ingredients. Tap one to remove it from your inventory. | /remove                |
 | **/inventory [cat]** | View your full ingredient list grouped by category. Optionally filter by a specific category name to see only items in that group. | /inventory protein     |

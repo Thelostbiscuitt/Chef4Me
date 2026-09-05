@@ -79,12 +79,31 @@ async def cmd_add(message: Message, state: FSMContext):
             await on_bulk_input(message, state)
             return
 
-        # Single ingredient — store the name and ask for quantity
+        # Single ingredient — an inline amount like "/add 500g flour" or
+        # "/add soy sauce 625ml" skips straight to the category question.
+        inline = _parse_inline_amount(ingredient_input)
+        if inline:
+            name, amount, unit = inline
+            await state.update_data(
+                ingredient_name=name,
+                ingredient_count=1.0,
+                ingredient_quantity=amount,
+                ingredient_unit=unit,
+            )
+            await state.set_state(AddIngredientStates.waiting_for_category)
+            await message.answer(
+                "Choose a category:",
+                reply_markup=category_keyboard(),
+            )
+            return
+
+        # Store the name and ask how many items/packages were bought
         normalized = normalize_name(ingredient_input)
         await state.set_state(AddIngredientStates.waiting_for_quantity)
         await state.update_data(ingredient_name=normalized)
         await message.answer(
-            f"How much *{escape_markdown_v1(normalized)}* do you have?",
+            f"How many *{escape_markdown_v1(normalized)}* did you buy?\n"
+            "Send a number of items (e.g. `1`, `20`, `a dozen`).",
             parse_mode="Markdown",
         )
     else:
@@ -99,54 +118,99 @@ async def cmd_add(message: Message, state: FSMContext):
 
 @router.message(AddIngredientStates.waiting_for_quantity, F.text)
 async def on_quantity_input(message: Message, state: FSMContext):
-    """Handle text input while waiting for quantity.
+    """Handle text input while waiting for the item count.
 
     This handler serves two purposes:
     1. When /add is called WITHOUT a name → the first message is treated as the
-       ingredient name.  We store it and then re-prompt for the quantity.
+       ingredient name.  We store it and then re-prompt for the count.
     2. When /add is called WITH a name (or after step 1) → the message is
-       parsed as the quantity.
+       parsed as the number of items/packages.
     """
     data = await state.get_data()
     raw = message.text.strip()
 
-    # If we already have a name, this message should be the quantity.
+    if raw.startswith("/"):
+        return  # commands like /cancel are handled elsewhere
+
+    # If we already have a name, this message should be the count.
     if "ingredient_name" in data:
-        # ── Parse quantity ────────────────────────────────────────────────────
-        try:
-            quantity = float(raw.replace(",", "."))
-        except ValueError:
+        count = _parse_count(raw)
+        if count is None or count <= 0:
             await message.answer(
-                "That doesn't look like a number. Please send a quantity "
-                "(e.g. `2`, `0.5`, `250`).",
+                "That doesn't look like a number of items. Please send how many "
+                "you bought (e.g. `1`, `20`, `a dozen`).",
                 parse_mode="Markdown",
             )
             return
 
-        if quantity <= 0:
-            await message.answer("Quantity must be greater than 0. Try again.")
-            return
-
-        await state.update_data(ingredient_quantity=quantity)
-        await state.set_state(AddIngredientStates.waiting_for_unit)
+        await state.update_data(ingredient_count=count)
+        await state.set_state(AddIngredientStates.waiting_for_amount)
         await message.answer(
-            "Choose the unit:",
-            reply_markup=unit_keyboard(),
+            "And how much is in *each one*?\n"
+            "Send the amount with a unit (e.g. `625 ml`, `500 g`, `1 L`, "
+            "`1 bottle`) — or just a number like `625` and I'll ask the unit.",
+            parse_mode="Markdown",
         )
     else:
-        # ── First message is the ingredient name ─────────────────────────────
+        # First message is the ingredient name.
         if not raw:
             await message.answer("Please send a valid ingredient name.")
             return
 
         normalized = normalize_name(raw)
         await state.update_data(ingredient_name=normalized)
-        # Stay in waiting_for_quantity — next message will be the quantity.
+        # Stay in waiting_for_quantity — next message will be the count.
         await message.answer(
-            f"How much *{escape_markdown_v1(normalized)}* do you have?\n"
-            "Send a number (e.g. `2`, `0.5`, `250`).",
+            f"How many *{escape_markdown_v1(normalized)}* did you buy?\n"
+            "Send a number of items (e.g. `1`, `20`, `a dozen`).",
             parse_mode="Markdown",
         )
+
+
+# ── Per-item measurement received ───────────────────────────────────────────
+@router.message(AddIngredientStates.waiting_for_amount, F.text)
+async def on_amount_input(message: Message, state: FSMContext):
+    """Parse how much is in EACH item: '625 ml', '500g', '1 bottle' — or a
+    bare number like '625', in which case we ask for the unit afterwards."""
+    raw = message.text.strip()
+
+    if raw.startswith("/"):
+        return  # commands like /cancel are handled elsewhere
+
+    if raw.lower() in ("skip", "-", "none", "n/a"):
+        amount, unit = 1.0, "pcs"
+    else:
+        result = _parse_amount(raw)
+        if result is None:
+            await message.answer(
+                "I couldn't read that measurement. Send the amount in *each one* "
+                "with a unit, e.g. `625 ml`, `500 g`, `1 L`, `1 bottle` — or just "
+                "a number like `625` and I'll ask the unit.",
+                parse_mode="Markdown",
+            )
+            return
+        amount, unit = result
+        if amount <= 0:
+            await message.answer("The amount must be greater than 0. Try again.")
+            return
+
+    await state.update_data(ingredient_quantity=amount)
+
+    if unit:
+        await state.update_data(ingredient_unit=unit)
+        await state.set_state(AddIngredientStates.waiting_for_category)
+        await message.answer(
+            "Choose a category:",
+            reply_markup=category_keyboard(),
+        )
+        return
+
+    # Amount without a unit → ask which unit via the keyboard.
+    await state.set_state(AddIngredientStates.waiting_for_unit)
+    await message.answer(
+        "Choose the unit:",
+        reply_markup=unit_keyboard(),
+    )
 
 
 # ── Unit selected via inline keyboard ──────────────────────────────────────
@@ -168,6 +232,32 @@ async def on_unit_select(callback: CallbackQuery, state: FSMContext):
             "Choose a category:",
             reply_markup=category_keyboard(),
         )
+
+
+# ── Unit typed as text (fallback to the keyboard) ───────────────────────────
+@router.message(AddIngredientStates.waiting_for_unit, F.text)
+async def on_unit_text(message: Message, state: FSMContext):
+    """Allow typing a unit instead of tapping a button."""
+    raw = message.text.strip()
+
+    if raw.startswith("/"):
+        return  # commands like /cancel are handled elsewhere
+
+    unit = _normalize_unit(raw)
+    if unit is None:
+        await message.answer(
+            "I don't know that unit. Send one like `ml`, `g`, `pcs` "
+            "or tap a button below.",
+            parse_mode="Markdown",
+        )
+        return
+
+    await state.update_data(ingredient_unit=unit)
+    await state.set_state(AddIngredientStates.waiting_for_category)
+    await message.answer(
+        "Choose a category:",
+        reply_markup=category_keyboard(),
+    )
 
 
 # ── Category selected via inline keyboard ──────────────────────────────────
@@ -199,6 +289,9 @@ async def on_expiry_date(message: Message, state: FSMContext):
     data = await state.get_data()
     raw = message.text.strip().lower()
 
+    if raw.startswith("/"):
+        return  # commands like /cancel are handled elsewhere
+
     expiry_date = None
 
     if raw not in ("skip", "-", "none", "n/a", "/"):
@@ -221,20 +314,33 @@ async def on_expiry_date(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    count = float(data.get("ingredient_count", 1))
+    per_item = float(data.get("ingredient_quantity", 1))
+    unit = data["ingredient_unit"]
+    total = count * per_item
+
     ingredient_id = await db.add_ingredient(
         user_id=message.from_user.id,
         name=data["ingredient_name"],
-        quantity=data["ingredient_quantity"],
-        unit=data["ingredient_unit"],
+        quantity=total,
+        unit=unit,
         category=data["ingredient_category"],
         expiry_date=expiry_date,
         purchase_date=date.today().isoformat(),
     )
 
+    # Show the multiplication only when it adds information.
+    if count != 1 and not (unit == "pcs" and per_item == 1):
+        amount_str = (
+            f"{_fmt_num(count)} × {_fmt_num(per_item)} {unit} = "
+            f"{_fmt_num(total)} {unit}"
+        )
+    else:
+        amount_str = f"{_fmt_num(total)} {unit}"
+
     expiry_str = f" | Expires: {expiry_date}" if expiry_date else ""
     await message.answer(
-        f"✅ *Added:* {data['ingredient_name']} "
-        f"({data['ingredient_quantity']} {data['ingredient_unit']}) "
+        f"✅ *Added:* {data['ingredient_name']} ({amount_str}) "
         f"[{data['ingredient_category']}]{expiry_str}",
         parse_mode="Markdown",
     )
@@ -632,12 +738,132 @@ def _parse_quantity_reply(raw: str) -> tuple[float, str | None] | None:
     """Parse a quantity reply like '500', '500 ml', '2 bottles', '0.5'.
     Returns (quantity, unit_or_None) or None if unparseable."""
     raw = raw.strip().lower().replace(",", ".")
-    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Zµ/]{1,10})?$", raw)
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Zµ/]{1,12})?$", raw)
     if not match:
         return None
     qty = float(match.group(1))
-    unit = match.group(2)
-    return (qty, unit.lower() if unit else None)
+    unit_word = match.group(2)
+    if unit_word:
+        unit = _normalize_unit(unit_word) or unit_word.lower()
+    else:
+        unit = None
+    return (qty, unit)
+
+
+# ── Single-add parsing helpers ──────────────────────────────────────────────
+
+UNIT_SYNONYMS = {
+    # weight
+    "g": "g", "gram": "g", "grams": "g", "gr": "g",
+    "kg": "kg", "kilo": "kg", "kilos": "kg",
+    "kilogram": "kg", "kilograms": "kg",
+    "lb": "lb", "lbs": "lb", "pound": "lb", "pounds": "lb",
+    "oz": "oz", "ounce": "oz", "ounces": "oz",
+    # volume
+    "ml": "ml", "mil": "ml", "milliliter": "ml", "milliliters": "ml",
+    "millilitre": "ml", "millilitres": "ml",
+    "l": "L", "lt": "L", "liter": "L", "liters": "L",
+    "litre": "L", "litres": "L",
+    "cup": "cups", "cups": "cups",
+    "tbsp": "tbsp", "tbs": "tbsp", "tablespoon": "tbsp", "tablespoons": "tbsp",
+    "tsp": "tsp", "teaspoon": "tsp", "teaspoons": "tsp",
+    # counts / containers
+    "pcs": "pcs", "pc": "pcs", "piece": "pcs", "pieces": "pcs",
+    "bottle": "pcs", "bottles": "pcs",
+    "can": "pcs", "cans": "pcs",
+    "jar": "pcs", "jars": "pcs",
+    "pack": "pcs", "packs": "pcs", "packet": "pcs", "packets": "pcs",
+    "bag": "pcs", "bags": "pcs",
+    "box": "pcs", "boxes": "pcs",
+    "carton": "pcs", "cartons": "pcs",
+    "tin": "pcs", "tins": "pcs", "tray": "pcs", "trays": "pcs",
+    # produce
+    "bunch": "bunches", "bunches": "bunches",
+    "clove": "cloves", "cloves": "cloves",
+    "pinch": "pinches", "pinches": "pinches",
+    "whole": "whole",
+}
+
+
+def _normalize_unit(word: str) -> str | None:
+    """Map a user-typed unit word to a canonical unit (g, kg, ml, L, pcs…).
+    Returns None for unrecognized words."""
+    return UNIT_SYNONYMS.get(word.strip().lower())
+
+
+def _fmt_num(value: float) -> str:
+    """Format a number without a trailing .0 (625.0 → '625')."""
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "half": 0.5, "couple": 2, "pair": 2,
+}
+
+
+def _parse_count(raw: str) -> float | None:
+    """Parse a count of items: '20', '20 bottles', 'a dozen', 'half a dozen'.
+    Returns the count or None if unparseable."""
+    text = raw.strip().lower().replace(",", ".")
+    match = re.match(r"^(\d+(?:\.\d+)?)", text)
+    if match:
+        return float(match.group(1))
+    words = text.split()
+    if "dozen" in words:
+        return 6.0 if "half" in words else 12.0
+    for word in words:
+        if word in _NUMBER_WORDS:
+            return float(_NUMBER_WORDS[word])
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _parse_amount(raw: str) -> tuple[float, str | None] | None:
+    """Parse a per-item measurement: '625 ml', '500g', '1 bottle', '0.5'.
+    Returns (amount, unit_or_None) or None if unparseable/unknown unit."""
+    text = raw.strip().lower().replace(",", ".")
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Zµ/]{1,12})?$", text)
+    if not match:
+        return None
+    amount = float(match.group(1))
+    unit_word = match.group(2)
+    if unit_word:
+        unit = _normalize_unit(unit_word)
+        if unit is None:
+            return None  # unknown unit word — caller re-asks
+    else:
+        unit = None
+    return (amount, unit)
+
+
+_INLINE_LEAD_RE = re.compile(
+    r"^(?P<num>\d+(?:[.,]\d+)?)\s*(?P<unit>[a-zA-Zµ/]{1,12})\s+(?P<name>.+)$"
+)
+_INLINE_TRAIL_RE = re.compile(
+    r"^(?P<name>.+?)\s+(?P<num>\d+(?:[.,]\d+)?)\s*(?P<unit>[a-zA-Zµ/]{1,12})$"
+)
+
+
+def _parse_inline_amount(raw: str) -> tuple[str, float, str] | None:
+    """Parse an amount written inside the /add argument:
+    '/add 500g flour' or '/add soy sauce 625ml' → (name, amount, unit)."""
+    for pattern in (_INLINE_LEAD_RE, _INLINE_TRAIL_RE):
+        match = pattern.match(raw.strip())
+        if not match:
+            continue
+        unit = _normalize_unit(match.group("unit"))
+        if unit is None:
+            continue  # e.g. '3 cheese pizza' — not an amount
+        amount = float(match.group("num").replace(",", "."))
+        if amount <= 0:
+            continue
+        name = re.sub(r"^(of|with)\s+", "", match.group("name").strip()).strip()
+        return normalize_name(name), amount, unit
+    return None
 
 
 async def _present_parsed_for_confirmation(
