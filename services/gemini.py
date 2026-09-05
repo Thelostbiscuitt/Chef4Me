@@ -240,10 +240,14 @@ class GeminiService:
 plain list, a shopping list, or a casual sentence (e.g. "I bought 2kg of
 chicken, a dozen eggs and some rice yesterday"). For each ingredient extract:
 - name: the ingredient name (normalized, singular form)
-- quantity: the amount as a number. Default to 1 when unspecified.
-  "a dozen" = 12, "a couple" = 2, "half a litre" = 0.5, "a pinch" = 1.
+- quantity: the amount as a number, or null if the amount is not explicitly
+  stated in the text. NEVER guess or invent an amount — if the text doesn't say
+  how much, use null and the user will be asked. Exceptions where a number IS
+  stated in words: "a dozen" = 12, "a couple" = 2, "half a litre" = 0.5,
+  "a pinch" = 1.
 - unit: one of g, kg, ml, L, pcs, cups, tbsp, tsp, lb, oz, bunches, cloves, whole.
-  Use pcs for countable items.
+  Use pcs for countable items. If quantity is null, still give the most likely
+  unit for this ingredient (it will be shown as a hint when the user is asked).
 - category: one of protein, vegetable, grain, dairy, spice, sauce, oil, fruit, beverage, other
 - expiry_hint: ONLY if the text mentions expiry/freshness for that item
   (e.g. "expires in 3 days", "going off tomorrow", "use by friday").
@@ -259,7 +263,7 @@ Return a JSON array of objects with these fields. Only return valid JSON."""
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "quantity": {"type": "number"},
+                    "quantity": {"type": ["number", "null"]},
                     "unit": {"type": "string"},
                     "category": {"type": "string"},
                     "expiry_hint": {"type": "string"},
@@ -284,9 +288,14 @@ Return a JSON array of objects with these fields. Only return valid JSON."""
 identify. The image may be a grocery receipt, a handwritten or printed shopping
 list, a fridge/pantry photo, or food packaging. For each ingredient extract:
 - name: the ingredient name (normalized, singular form)
-- quantity: the amount as a number. Default to 1 when unspecified or unreadable.
+- quantity: the amount as a number, or null if the amount is not readable or
+  explicitly shown. NEVER guess or estimate an amount — if the label weight/
+  volume isn't visible (e.g. a generic bottle or jar), use null and the user
+  will be asked. Only use a number when it is actually written on or clearly
+  inferable from the image (e.g. "500 ml" on a carton, 6 eggs in a box).
 - unit: one of g, kg, ml, L, pcs, cups, tbsp, tsp, lb, oz, bunches, cloves, whole.
-  Use pcs for countable items.
+  Use pcs for countable items. If quantity is null, still give the most likely
+  unit for this ingredient (it will be shown as a hint when the user is asked).
 - category: one of protein, vegetable, grain, dairy, spice, sauce, oil, fruit, beverage, other
 - expiry_hint: ONLY if the image shows an expiry/best-before/use-by date or a
   clearly visible freshness context. Otherwise omit this field entirely.
@@ -300,7 +309,7 @@ Only return valid JSON."""
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "quantity": {"type": "number"},
+                    "quantity": {"type": ["number", "null"]},
                     "unit": {"type": "string"},
                     "category": {"type": "string"},
                     "expiry_hint": {"type": "string"},
@@ -312,6 +321,56 @@ Only return valid JSON."""
             return await self._generate([image_part, prompt], schema)
         except Exception as e:
             logger.error(f"Failed to extract ingredients from image: {e}")
+            return []
+
+    async def apply_correction(
+        self, items: list[dict], correction: str
+    ) -> list[dict]:
+        """Apply a user's plain-English correction to a previously parsed
+        ingredient list and return the full updated list."""
+        prompt = f"""Here is a list of kitchen ingredients that was parsed earlier,
+as JSON:
+
+{json.dumps(items, ensure_ascii=False)}
+
+The user reviewed this list and says:
+
+"{correction}"
+
+Apply their correction. Rules:
+- Change, add or remove items exactly as the user asks.
+- Keep every item they did NOT mention unchanged (same name, quantity, unit,
+  category, expiry).
+- If the user corrects or supplies an amount ("the soy sauce is 500ml",
+  "2 bottles of milk"), set that item's quantity to the number they mean.
+  Never guess an amount they didn't state — use null instead.
+- quantity: a number, or null when the amount is unknown. unit: one of
+  g, kg, ml, L, pcs, cups, tbsp, tsp, lb, oz, bunches, cloves, whole.
+- category: one of protein, vegetable, grain, dairy, spice, sauce, oil,
+  fruit, beverage, other.
+- Keep any expiry information unless the user changes it.
+
+Return the FULL updated list as a JSON array. Only return valid JSON."""
+
+        schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "quantity": {"type": ["number", "null"]},
+                    "unit": {"type": "string"},
+                    "category": {"type": "string"},
+                    "expiry_hint": {"type": "string"},
+                },
+                "required": ["name", "quantity", "unit", "category"]
+            }
+        }
+
+        try:
+            return await self._generate(prompt, schema)
+        except Exception as e:
+            logger.error(f"Failed to apply correction: {e}")
             return []
 
     async def _generate(self, prompt: str, response_schema: dict = None) -> dict:

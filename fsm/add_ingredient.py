@@ -21,3 +21,5 @@ class SetPreferencesStates(StatesGroup):
 class BulkAddStates(StatesGroup):
     """States for bulk ingredient addition."""
     waiting_for_bulk_input = State()
+    waiting_for_quantity_fix = State()  # asking the user for an unknown amount
+    reviewing_parsed = State()          # parsed list shown; corrections accepted

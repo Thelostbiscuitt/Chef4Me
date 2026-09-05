@@ -1,11 +1,12 @@
 """Inventory router — handles /add, /add bulk, /remove, /inventory, /expiry,
 and photo/OCR-based ingredient extraction."""
 import io
+import re
 import logging
 from datetime import date
 
 from aiogram import Router, F
-from aiogram.filters import StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
@@ -338,6 +339,13 @@ async def on_bulk_confirm(callback: CallbackQuery, state: FSMContext):
 
 
 # ── Cancel during any state ────────────────────────────────────────────────
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Allow typing /cancel to abort any in-progress flow."""
+    await state.clear()
+    await message.answer("❌ Cancelled. Your inventory is unchanged.")
+
+
 @router.callback_query(F.data == "cancel")
 async def on_cancel(callback: CallbackQuery, state: FSMContext):
     """Cancel the current multi-step flow."""
@@ -593,30 +601,193 @@ def _resolve_expiry_hints(parsed: list[dict]) -> list[dict]:
     return parsed
 
 
-async def _present_parsed_for_confirmation(
-    message: Message, state: FSMContext, parsed: list[dict], processing_msg: Message
-):
-    """Store parsed items in FSM and show the shared confirmation card."""
-    await state.update_data(bulk_parsed=parsed)
+def _fmt_qty(item: dict) -> str:
+    """Human-readable 'quantity unit' fragment for display."""
+    qty, unit = item.get("quantity"), item.get("unit", "pcs")
+    if qty is None:
+        return "?"
+    unit_str = "" if unit in (None, "", "unknown") else f" {unit}"
+    qty_int = int(qty) if float(qty).is_integer() else qty
+    return f"{qty_int}{unit_str}"
 
+
+def _render_card(parsed: list[dict]) -> str:
     lines = ["📋 *Parsed Ingredients:*\n"]
     for i, item in enumerate(parsed, 1):
         expiry_suffix = f" ⏰ {item['expiry_date']}" if item.get("expiry_date") else ""
         lines.append(
-            f"{i}. {item.get('name', '?')} — "
-            f"{item.get('quantity', '?')} {item.get('unit', '?')} "
+            f"{i}. {escape_markdown_v1(item.get('name', '?'))} — {_fmt_qty(item)} "
             f"[{item.get('category', 'other')}]{expiry_suffix}"
         )
     lines.append(f"\n✅ Total: {len(parsed)} items")
-    lines.append("\nAdd all of these to your inventory?")
+    lines.append(
+        "\n💬 Spot a mistake? Just reply with a correction "
+        "(e.g. `the soy sauce is 500ml`) and I'll update the list.\n"
+        "✅ Confirm to save, or ❌ to cancel."
+    )
+    return "\n".join(lines)
 
+
+def _parse_quantity_reply(raw: str) -> tuple[float, str | None] | None:
+    """Parse a quantity reply like '500', '500 ml', '2 bottles', '0.5'.
+    Returns (quantity, unit_or_None) or None if unparseable."""
+    raw = raw.strip().lower().replace(",", ".")
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Zµ/]{1,10})?$", raw)
+    if not match:
+        return None
+    qty = float(match.group(1))
+    unit = match.group(2)
+    return (qty, unit.lower() if unit else None)
+
+
+async def _present_parsed_for_confirmation(
+    message: Message, state: FSMContext, parsed: list[dict], processing_msg: Message
+):
+    """Store parsed items in FSM, ask about any unknown amounts, then show the
+    shared confirmation card (which also accepts plain-English corrections)."""
+    # Normalize items coming back from the model.
+    clean: list[dict] = []
+    for item in parsed:
+        qty = item.get("quantity")
+        try:
+            qty = float(qty) if qty is not None else None
+        except (TypeError, ValueError):
+            qty = None
+        if qty is not None and qty <= 0:
+            qty = None
+        clean.append({
+            "name": str(item.get("name", "?")).strip(),
+            "quantity": qty,
+            "unit": str(item.get("unit") or "pcs").strip().lower(),
+            "category": str(item.get("category") or "other").strip().lower(),
+            "expiry_date": item.get("expiry_date"),
+        })
+
+    await state.update_data(bulk_parsed=clean)
+
+    # Items with an unknown amount → ask the user one by one.
+    queue = [i for i, item in enumerate(clean) if item["quantity"] is None]
+    if queue:
+        await state.update_data(qty_queue=queue)
+        await state.set_state(BulkAddStates.waiting_for_quantity_fix)
+        first = clean[queue[0]]
+        unit_hint = first["unit"] if first["unit"] not in ("unknown", "pcs") else ""
+        hint = f" (suggested unit: {unit_hint})" if unit_hint else ""
+        text = (
+            f"❓ How much *{escape_markdown_v1(first['name'])}* do you have?{hint}\n\n"
+            "Send a number (e.g. `500`) or an amount with a unit "
+            "(`500 ml`, `2 bottles`) — or `skip` to save it as 1 pcs."
+        )
+        if processing_msg:
+            await processing_msg.edit_text(text, parse_mode="Markdown")
+        else:
+            await message.answer(text, parse_mode="Markdown")
+        return
+
+    await state.set_state(BulkAddStates.reviewing_parsed)
     from utils.keyboards import confirm_keyboard
 
-    await processing_msg.edit_text(
-        "\n".join(lines),
+    if processing_msg:
+        await processing_msg.edit_text(
+            _render_card(clean),
+            parse_mode="Markdown",
+            reply_markup=confirm_keyboard("bulk_add"),
+        )
+    else:
+        await message.answer(
+            _render_card(clean),
+            parse_mode="Markdown",
+            reply_markup=confirm_keyboard("bulk_add"),
+        )
+
+
+async def _ask_next_quantity(message: Message, state: FSMContext):
+    """Prompt for the next unknown amount, or show the card when done."""
+    data = await state.get_data()
+    parsed: list[dict] = data["bulk_parsed"]
+    queue: list[int] = data.get("qty_queue", [])
+
+    if not queue:
+        await state.set_state(BulkAddStates.reviewing_parsed)
+        from utils.keyboards import confirm_keyboard
+
+        await message.answer(
+            _render_card(parsed),
+            parse_mode="Markdown",
+            reply_markup=confirm_keyboard("bulk_add"),
+        )
+        return
+
+    item = parsed[queue[0]]
+    unit_hint = item["unit"] if item["unit"] not in ("unknown", "pcs") else ""
+    hint = f" (suggested unit: {unit_hint})" if unit_hint else ""
+    await message.answer(
+        f"❓ And how much *{escape_markdown_v1(item['name'])}*?{hint}\n"
+        "(`500`, `500 ml`, `2 bottles`, or `skip`)",
         parse_mode="Markdown",
-        reply_markup=confirm_keyboard("bulk_add"),
     )
+
+
+@router.message(BulkAddStates.waiting_for_quantity_fix, F.text)
+async def on_quantity_fix(message: Message, state: FSMContext):
+    """User answered the 'how much?' question for one parsed item."""
+    data = await state.get_data()
+    parsed: list[dict] = data["bulk_parsed"]
+    queue: list[int] = data.get("qty_queue", [])
+    raw = message.text.strip()
+    idx = queue[0]
+
+    if raw.lower() in ("skip", "-", "none", "idk", "dunno"):
+        parsed[idx]["quantity"] = 1
+        if parsed[idx]["unit"] == "unknown":
+            parsed[idx]["unit"] = "pcs"
+    else:
+        result = _parse_quantity_reply(raw)
+        if result is None:
+            await message.answer(
+                "That doesn't look like an amount. Try `500`, `500 ml`, "
+                "`2 bottles` — or `skip`.",
+            )
+            return
+        qty, unit = result
+        if qty <= 0:
+            await message.answer("Quantity must be greater than 0. Try again.")
+            return
+        parsed[idx]["quantity"] = qty
+        if unit:
+            parsed[idx]["unit"] = unit
+        elif parsed[idx]["unit"] == "unknown":
+            parsed[idx]["unit"] = "pcs"
+
+    queue = queue[1:]
+    await state.update_data(bulk_parsed=parsed, qty_queue=queue)
+    await _ask_next_quantity(message, state)
+
+
+@router.message(BulkAddStates.reviewing_parsed, F.text)
+async def on_review_correction(message: Message, state: FSMContext):
+    """User replied with a plain-English correction to the parsed list."""
+    if gemini is None:
+        await message.answer("⚠️ AI service is not available right now.")
+        return
+
+    data = await state.get_data()
+    parsed: list[dict] = data.get("bulk_parsed", [])
+    correction = message.text.strip()
+    if not correction:
+        return
+
+    processing_msg = await message.answer("🤖 Updating your list…")
+    updated = await gemini.apply_correction(parsed, correction)
+    if not updated:
+        await processing_msg.edit_text(
+            "❌ I couldn't apply that correction. Try rephrasing it, "
+            "or ❌ cancel and start again."
+        )
+        return
+
+    _resolve_expiry_hints(updated)
+    await _present_parsed_for_confirmation(message, state, updated, processing_msg)
 
 
 # ── Photo / OCR add ────────────────────────────────────────────────────────
