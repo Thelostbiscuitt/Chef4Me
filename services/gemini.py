@@ -160,8 +160,8 @@ class GeminiService:
                                 }
                             },
                             "match_percentage": {"type": "integer", "minimum": 0, "maximum": 100},
-                            "calories_per_serving": {"type": ["integer", "null"]},
-                            "step_count": {"type": ["integer", "null"]}
+                            "calories_per_serving": {"type": "integer", "nullable": True},
+                            "step_count": {"type": "integer", "nullable": True}
                         },
                         "required": ["name", "cuisine", "description", "difficulty",
                                      "cook_time_minutes", "ingredients", "match_percentage"]
@@ -227,7 +227,7 @@ class GeminiService:
                 },
                 "steps": {"type": "array", "items": {"type": "string"}, "minItems": 8},
                 "tips": {"type": "array", "items": {"type": "string"}, "minItems": 3},
-                "calories_per_serving": {"type": ["integer", "null"]},
+                "calories_per_serving": {"type": "integer", "nullable": True},
                 "nutrition": {
                     "type": "object",
                     "properties": {
@@ -290,7 +290,7 @@ Return a JSON array of objects with these fields. Only return valid JSON."""
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "quantity": {"type": ["number", "null"]},
+                    "quantity": {"type": "number", "nullable": True},
                     "unit": {"type": "string"},
                     "category": {"type": "string"},
                     "expiry_hint": {"type": "string"},
@@ -336,7 +336,7 @@ Only return valid JSON."""
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "quantity": {"type": ["number", "null"]},
+                    "quantity": {"type": "number", "nullable": True},
                     "unit": {"type": "string"},
                     "category": {"type": "string"},
                     "expiry_hint": {"type": "string"},
@@ -385,7 +385,7 @@ Return the FULL updated list as a JSON array. Only return valid JSON."""
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "quantity": {"type": ["number", "null"]},
+                    "quantity": {"type": "number", "nullable": True},
                     "unit": {"type": "string"},
                     "category": {"type": "string"},
                     "expiry_hint": {"type": "string"},
