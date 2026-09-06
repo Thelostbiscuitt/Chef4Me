@@ -20,9 +20,13 @@ from utils.keyboards import (
     unit_keyboard,
     ingredient_remove_keyboard,
     expiry_keyboard,
+    paywall_keyboard,
 )
 from utils.normalize import normalize_name
 from utils.dates import parse_expiry_input
+
+import config
+import services.subscriptions as subs
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +386,21 @@ async def on_bulk_input(message: Message, state: FSMContext):
         )
         await state.clear()
         return
+
+    if db is not None:
+        allowed, used, limit = await subs.check_and_consume(
+            db, message.from_user.id, "bulk_adds",
+            free_limit=config.FREE_BULK_ADDS_PER_DAY,
+        )
+        if not allowed:
+            await message.answer(
+                f"⏳ You've used your {limit} bulk adds for today.\n\n"
+                + await subs.paywall_text(db, message.from_user.id),
+                parse_mode="Markdown",
+                reply_markup=paywall_keyboard(),
+            )
+            await state.clear()
+            return
 
     raw_text = message.text.strip()
     if not raw_text:
@@ -1030,6 +1049,20 @@ async def on_photo_upload(message: Message, state: FSMContext):
         )
         return
 
+    if db is not None:
+        allowed, used, limit = await subs.check_monthly(
+            db, message.from_user.id, "ocr_scans",
+            free_limit=config.FREE_OCR_PER_MONTH,
+        )
+        if not allowed:
+            await message.answer(
+                f"📸 You've used your {limit} free photo scans this month.\n\n"
+                + await subs.paywall_text(db, message.from_user.id),
+                parse_mode="Markdown",
+                reply_markup=paywall_keyboard(),
+            )
+            return
+
     if message.photo:
         # Telegram photos are always JPEG; pick the largest resolution.
         file_id = message.photo[-1].file_id
@@ -1067,5 +1100,65 @@ async def on_photo_upload(message: Message, state: FSMContext):
         )
         return
 
+    _resolve_expiry_hints(parsed)
+    await _present_parsed_for_confirmation(message, state, parsed, processing_msg)
+
+
+# ── Voice note add (premium) ───────────────────────────────────────────────
+
+@router.message(StateFilter(None), F.voice)
+async def on_voice_note(message: Message, state: FSMContext):
+    """Pro: transcribe a voice note with Gemini and parse it as a bulk add."""
+    if gemini is None:
+        await message.answer(
+            "⚠️ AI service is not available right now."
+        )
+        return
+
+    if db is None or not await subs.is_premium(db, message.from_user.id):
+        await message.answer(
+            (
+                "🎙️ Voice adds are a *Pro* feature.\n\n"
+                "Say what you bought out loud and I'll do the rest.\n\n"
+            )
+            + (await subs.paywall_text(db, message.from_user.id)
+               if db is not None else "Use /subscribe to upgrade."),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+
+    processing_msg = await message.answer("🎙️ Transcribing your voice note…")
+    try:
+        file_id = message.voice.file_id
+        buffer = io.BytesIO()
+        await message.bot.download(file=file_id, destination=buffer)
+        mime = getattr(message.voice, "mime_type", None) or "audio/ogg"
+        text = await gemini.transcribe_voice(buffer.getvalue(), mime, premium=True)
+    except Exception:
+        logger.exception("Failed to transcribe voice note")
+        await processing_msg.edit_text(
+            "❌ Couldn't process that voice note. Please try again."
+        )
+        return
+
+    if not text:
+        await processing_msg.edit_text(
+            "❌ I couldn't hear any ingredients in that note. Try again?"
+        )
+        return
+
+    parsed = await gemini.identify_ingredients_from_text(text)
+    if not parsed:
+        await processing_msg.edit_text(
+            "❌ Could not parse any ingredients from your note.\n"
+            "Try listing them clearly, e.g. \"I bought milk, eggs and rice\"."
+        )
+        return
+
+    await processing_msg.edit_text(
+        f"🎙️ *Heard:* {escape_markdown_v1(text)}",
+        parse_mode="Markdown",
+    )
     _resolve_expiry_hints(parsed)
     await _present_parsed_for_confirmation(message, state, parsed, processing_msg)

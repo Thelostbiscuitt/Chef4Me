@@ -9,8 +9,16 @@ from aiogram.exceptions import TelegramBadRequest
 
 from services.database import DatabaseService
 from services.gemini import GeminiService
-from utils.formatters import format_meal_suggestion, format_full_recipe, truncate_text
-from utils.keyboards import meal_suggestion_keyboard, recipe_action_keyboard, rating_keyboard
+from utils.formatters import (
+    format_meal_suggestion, format_full_recipe, truncate_text, escape_markdown_v1,
+)
+from utils.keyboards import (
+    meal_suggestion_keyboard, recipe_action_keyboard, rating_keyboard,
+    scale_keyboard, paywall_keyboard,
+)
+
+import config
+import services.subscriptions as subs
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +41,21 @@ MAX_MESSAGE_LENGTH = 4096
 async def cmd_suggest(message: Message, state: FSMContext):
     """Suggest meals based on user's ingredients and preferences."""
     user_id = message.from_user.id
+
+    allowed, used, limit = await subs.check_and_consume(
+        db, user_id, "suggests",
+        free_limit=config.FREE_SUGGESTS_PER_DAY,
+        premium_limit=config.PREMIUM_SUGGESTS_PER_DAY,
+    )
+    if not allowed:
+        await message.answer(
+            f"⏳ You've used all {limit} free AI suggestions for today.\n\n"
+            + await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+    premium = await subs.is_premium(db, user_id)
 
     parts = message.text.strip().split()
     arg_cuisine = None
@@ -91,6 +114,7 @@ async def cmd_suggest(message: Message, state: FSMContext):
             count=6,
             preferred_cuisines=preferred_cuisines if preferred_cuisines else None,
             avoid_cuisines=avoid_cuisines if avoid_cuisines else None,
+            premium=premium,
         )
     except Exception as exc:
         logger.error("Gemini suggest_meals failed for user %s: %s", user_id, exc)
@@ -229,6 +253,19 @@ async def cb_suggest_more(callback: CallbackQuery, state: FSMContext):
     prefs = await db.get_preferences(user_id)
     avoid_cuisines = await db.get_recent_cuisines(user_id, limit=20)
 
+    allowed, used, limit = await subs.check_and_consume(
+        db, user_id, "suggests",
+        free_limit=config.FREE_SUGGESTS_PER_DAY,
+        premium_limit=config.PREMIUM_SUGGESTS_PER_DAY,
+    )
+    if not allowed:
+        await callback.answer(
+            f"You've used all {limit} free suggestions today. "
+            "Upgrade with /subscribe for unlimited!",
+            show_alert=True,
+        )
+        return
+
     try:
         response = await gemini.suggest_meals(
             ingredients=ingredients,
@@ -239,6 +276,7 @@ async def cb_suggest_more(callback: CallbackQuery, state: FSMContext):
             servings=prefs.get("serving_size", 2),
             count=6,
             avoid_cuisines=avoid_cuisines if avoid_cuisines else None,
+            premium=await subs.is_premium(db, user_id),
         )
     except Exception as exc:
         logger.error("Gemini re-suggest failed for user %s: %s", user_id, exc)
@@ -390,9 +428,24 @@ async def cb_rate(callback: CallbackQuery):
 # ======================================================================
 
 @router.message(F.text.startswith("/recipe"))
-async def cmd_recipe(message: Message):
+async def cmd_recipe(message: Message, state: FSMContext):
     """Fetch a complete, detailed recipe from Gemini."""
     user_id = message.from_user.id
+
+    allowed, used, limit = await subs.check_and_consume(
+        db, user_id, "recipes",
+        free_limit=config.FREE_RECIPES_PER_DAY,
+        premium_limit=config.PREMIUM_RECIPES_PER_DAY,
+    )
+    if not allowed:
+        await message.answer(
+            f"⏳ You've used all {limit} free recipes for today.\n\n"
+            + await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+    premium = await subs.is_premium(db, user_id)
 
     recipe_name = message.text.strip().removeprefix("/recipe").strip()
     if not recipe_name:
@@ -416,6 +469,7 @@ async def cmd_recipe(message: Message):
             dietary_restrictions=prefs.get("dietary_restrictions") or None,
             skill_level=prefs.get("skill_level", "beginner"),
             servings=prefs.get("serving_size", 2),
+            premium=premium,
         )
     except Exception as exc:
         logger.error("Gemini get_full_recipe failed for user %s: %s", user_id, exc)
@@ -444,11 +498,15 @@ async def cmd_recipe(message: Message):
             )
         return
 
-    text = format_full_recipe(recipe.model_dump())
+    recipe_data = recipe.model_dump()
+    await state.update_data(current_recipe=recipe_data, scale_factor=1)
+
+    text = format_full_recipe(recipe_data, premium=premium)
     text = truncate_text(text)
 
+    markup = scale_keyboard() if premium else None
     try:
-        await thinking_msg.edit_text(text, parse_mode="Markdown")
+        await thinking_msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
     except TelegramBadRequest:
         await thinking_msg.delete()
         plain = text.replace("*", "").replace("_", "")
@@ -625,3 +683,221 @@ def _build_suggestions_list_text(suggestions: list[dict], offset: int = 0) -> st
 
     lines.append("Tap a meal to see full details")
     return "\n".join(lines)
+
+
+# ======================================================================
+#  Callback: scale:{factor}  -- scale the last recipe (premium)
+# ======================================================================
+
+@router.callback_query(F.data.startswith("scale:"))
+async def cb_scale(callback: CallbackQuery, state: FSMContext):
+    if not await subs.is_premium(db, callback.from_user.id):
+        await callback.answer("Recipe scaling is a Pro feature.", show_alert=True)
+        return
+    factor = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    recipe = data.get("current_recipe")
+    if not recipe:
+        await callback.answer("Recipe expired — run /recipe again.", show_alert=True)
+        return
+
+    await callback.answer(f"Scaling to {factor}x…")
+    ingredients = [ing.get("name", "") for ing in recipe.get("ingredients", [])]
+    scaled = await gemini.scale_recipe(
+        recipe.get("name", "Recipe"), ingredients, factor, premium=True
+    )
+    scaled_items = scaled.get("ingredients", [])
+    if not scaled_items:
+        await callback.message.answer(
+            "Couldn't scale that recipe right now. Try again in a moment."
+        )
+        return
+
+    orig_names = [ing.get("name", "") for ing in recipe.get("ingredients", [])]
+    new_ings = []
+    for item in scaled_items:
+        sname = str(item.get("name", "")).strip()
+        qty = str(item.get("quantity", "")).strip()
+        have = any(sname.lower() in orig.lower() for orig in orig_names if sname)
+        new_ings.append({"name": f"{qty} {sname}".strip(), "have": have})
+
+    recipe["ingredients"] = new_ings
+    recipe["servings"] = max(1, round(recipe.get("servings", 2) * factor))
+    await state.update_data(current_recipe=recipe)
+
+    text = f"*Scaled {factor}x — serves ~{recipe['servings']}*\n\n" + format_full_recipe(
+        recipe, premium=True
+    )
+    text = truncate_text(text)
+    try:
+        await callback.message.edit_text(
+            text, parse_mode="Markdown", reply_markup=scale_keyboard()
+        )
+    except TelegramBadRequest:
+        await callback.message.answer(
+            text, parse_mode="Markdown", reply_markup=scale_keyboard()
+        )
+
+
+# ======================================================================
+#  Callback: use_up:{dish}  -- full recipe for expiring items (premium)
+# ======================================================================
+
+@router.callback_query(F.data.startswith("use_up:"))
+async def cb_use_up(callback: CallbackQuery):
+    if not await subs.is_premium(db, callback.from_user.id):
+        await callback.answer("This is a Pro feature.", show_alert=True)
+        return
+    dish = callback.data.split(":", 1)[1].strip()
+    if not dish:
+        await callback.answer("No dish found.", show_alert=True)
+        return
+    await callback.answer("Fetching recipe…")
+    user_id = callback.from_user.id
+    ingredients, seasonings = await db.get_ingredients_as_lists(user_id)
+    prefs = await db.get_preferences(user_id)
+    try:
+        recipe = await gemini.get_full_recipe(
+            recipe_name=dish,
+            ingredients=ingredients if ingredients else None,
+            seasonings=seasonings if seasonings else None,
+            dietary_restrictions=prefs.get("dietary_restrictions") or None,
+            skill_level=prefs.get("skill_level", "beginner"),
+            servings=prefs.get("serving_size", 2),
+            premium=True,
+        )
+    except Exception as exc:
+        logger.error("use_up recipe failed for user %s: %s", user_id, exc)
+        recipe = None
+    if not recipe:
+        await callback.message.answer(
+            f"Couldn't fetch a recipe for *{dish}*. Try /recipe {dish}",
+            parse_mode="Markdown",
+        )
+        return
+    recipe_data = recipe.model_dump()
+    await callback.bot.send_message(
+        callback.from_user.id,
+        truncate_text(format_full_recipe(recipe_data, premium=True)),
+        parse_mode="Markdown",
+        reply_markup=scale_keyboard(),
+    )
+
+
+# ======================================================================
+#  /leftover {item}  -- recipes for a specific leftover (premium)
+# ======================================================================
+
+@router.message(F.text.startswith("/leftover"))
+async def cmd_leftover(message: Message):
+    user_id = message.from_user.id
+    if not await subs.is_premium(db, user_id):
+        await message.answer(
+            await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+    leftover = message.text.strip().removeprefix("/leftover").strip()
+    if not leftover:
+        await message.answer(
+            "Usage: `/leftover <what you have>`\n\n"
+            "Example: `/leftover roast chicken`",
+            parse_mode="Markdown",
+        )
+        return
+    thinking = await message.answer(
+        f"🍳 Finding meals for your leftover *{escape_markdown_v1(leftover)}*…",
+        parse_mode="Markdown",
+    )
+    ingredients, seasonings = await db.get_ingredients_as_lists(user_id)
+    dishes = await gemini.leftover_recipes(leftover, ingredients, seasonings, premium=True)
+    if not dishes:
+        await thinking.edit_text(
+            "Couldn't come up with ideas right now — try again in a moment."
+        )
+        return
+    lines = [f"🍳 *Ideas for leftover {escape_markdown_v1(leftover)}:*\n"]
+    for d in dishes:
+        lines.append(
+            f"• *{escape_markdown_v1(d.get('name', '?'))}* "
+            f"({escape_markdown_v1(d.get('cuisine', ''))}) — "
+            f"{d.get('cook_time_minutes', '?')} min | "
+            f"{d.get('match_percentage', 0)}% match"
+        )
+        lines.append(f"  {d.get('description', '')}")
+    lines.append("\nFull recipe: /recipe <dish name>")
+    try:
+        await thinking.edit_text("\n".join(lines), parse_mode="Markdown")
+    except TelegramBadRequest:
+        await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+# ======================================================================
+#  /substitute {ingredient}  -- cooking substitutes (premium)
+# ======================================================================
+
+@router.message(F.text.startswith("/substitute"))
+async def cmd_substitute(message: Message):
+    user_id = message.from_user.id
+    if not await subs.is_premium(db, user_id):
+        await message.answer(
+            await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+    ingredient = message.text.strip().removeprefix("/substitute").strip()
+    if not ingredient:
+        await message.answer(
+            "Usage: `/substitute <ingredient>`\n\nExample: `/substitute eggs`",
+            parse_mode="Markdown",
+        )
+        return
+    await _send_substitutes(message, ingredient)
+
+
+async def _send_substitutes(message: Message, ingredient: str):
+    thinking = await message.answer(
+        f"🔄 Finding substitutes for *{escape_markdown_v1(ingredient)}*…",
+        parse_mode="Markdown",
+    )
+    subs_list = await gemini.substitutes(ingredient, premium=True)
+    if not subs_list:
+        await thinking.edit_text(
+            "Couldn't find substitutes right now — try again in a moment."
+        )
+        return
+    lines = [f"🔄 *Substitutes for {escape_markdown_v1(ingredient)}:*\n"]
+    for s in subs_list:
+        lines.append(
+            f"• *{escape_markdown_v1(s.get('substitute', '?'))}* — "
+            f"{escape_markdown_v1(s.get('ratio', ''))}"
+        )
+        if s.get("notes"):
+            lines.append(f"  {s['notes']}")
+    try:
+        await thinking.edit_text("\n".join(lines), parse_mode="Markdown")
+    except TelegramBadRequest:
+        await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+# Short alias — exact match so it never swallows /subscribe.
+@router.message(F.text == "/sub")
+async def cmd_sub_short(message: Message):
+    user_id = message.from_user.id
+    if not await subs.is_premium(db, user_id):
+        await message.answer(
+            await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+    ingredient = message.text.strip().removeprefix("/sub").strip()
+    if not ingredient:
+        await message.answer(
+            "Usage: `/sub <ingredient>`\n\nExample: `/sub eggs`",
+            parse_mode="Markdown",
+        )
+        return
+    await _send_substitutes(message, ingredient)

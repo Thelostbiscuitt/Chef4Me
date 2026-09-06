@@ -83,6 +83,45 @@ class DatabaseService:
                 last_active TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id BIGINT PRIMARY KEY,
+                plan TEXT NOT NULL DEFAULT 'free',
+                status TEXT NOT NULL DEFAULT 'active',
+                started_at TEXT NOT NULL,
+                expires_at TEXT,
+                provider TEXT,
+                reference TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS usage_quotas (
+                user_id BIGINT NOT NULL,
+                day TEXT NOT NULL,
+                suggests INTEGER NOT NULL DEFAULT 0,
+                recipes INTEGER NOT NULL DEFAULT 0,
+                ocr_scans INTEGER NOT NULL DEFAULT 0,
+                bulk_adds INTEGER NOT NULL DEFAULT 0,
+                plans INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, day)
+            );
+
+            CREATE TABLE IF NOT EXISTS meal_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id BIGINT NOT NULL,
+                start_date TEXT NOT NULL,
+                days INTEGER NOT NULL DEFAULT 7,
+                plan_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS redeem_codes (
+                code TEXT PRIMARY KEY,
+                plan TEXT NOT NULL DEFAULT 'lifetime',
+                created_by BIGINT,
+                redeemed_by BIGINT,
+                redeemed_at TEXT,
+                expires_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_ingredients_user ON ingredients(user_id);
             CREATE INDEX IF NOT EXISTS idx_ingredients_expiry ON ingredients(user_id, expiry_date);
             CREATE INDEX IF NOT EXISTS idx_recipe_history_user ON recipe_history(user_id);
@@ -360,6 +399,125 @@ class DatabaseService:
         )
         rows = await cursor.fetchall()
         return [row["cuisine"] for row in rows]
+
+    # ── Subscription Operations ──
+
+    async def get_subscription(self, user_id: int) -> dict | None:
+        """Return the user's subscription row (or None if they have none)."""
+        cursor = await self.db.execute(
+            "SELECT * FROM subscriptions WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def upsert_subscription(
+        self, user_id: int, plan: str, status: str = "active",
+        provider: str = None, reference: str = None, expires_at: str = None,
+    ) -> None:
+        now = datetime.utcnow().isoformat()
+        await self.db.execute(
+            """INSERT INTO subscriptions
+                   (user_id, plan, status, started_at, expires_at, provider, reference)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   plan = excluded.plan,
+                   status = excluded.status,
+                   started_at = excluded.started_at,
+                   expires_at = excluded.expires_at,
+                   provider = excluded.provider,
+                   reference = excluded.reference""",
+            (user_id, plan, status, now, expires_at, provider, reference),
+        )
+        await self.db.commit()
+
+    # ── Usage quota operations ──
+
+    _QUOTA_KINDS = {"suggests", "recipes", "ocr_scans", "bulk_adds", "plans"}
+
+    async def increment_usage(self, user_id: int, kind: str) -> dict:
+        """Increment today's usage counter for `kind` and return the row."""
+        if kind not in self._QUOTA_KINDS:
+            raise ValueError(f"Unknown quota kind: {kind}")
+        day = datetime.utcnow().strftime("%Y-%m-%d")
+        await self.db.execute(
+            f"""INSERT INTO usage_quotas (user_id, day, {kind})
+                VALUES (?, ?, 1)
+                ON CONFLICT(user_id, day) DO UPDATE SET {kind} = {kind} + 1""",
+            (user_id, day),
+        )
+        await self.db.commit()
+        cursor = await self.db.execute(
+            "SELECT * FROM usage_quotas WHERE user_id = ? AND day = ?", (user_id, day)
+        )
+        return dict(await cursor.fetchone())
+
+    async def get_usage_in_month(self, user_id: int, kind: str) -> int:
+        """Total usage of `kind` for the current calendar month."""
+        if kind not in self._QUOTA_KINDS:
+            raise ValueError(f"Unknown quota kind: {kind}")
+        month = datetime.utcnow().strftime("%Y-%m")
+        cursor = await self.db.execute(
+            f"SELECT COALESCE(SUM({kind}), 0) AS total FROM usage_quotas "
+            f"WHERE user_id = ? AND day LIKE ?",
+            (user_id, f"{month}-%"),
+        )
+        row = await cursor.fetchone()
+        return int(row["total"]) if row else 0
+
+    # ── Meal plan operations ──
+
+    async def save_meal_plan(
+        self, user_id: int, start_date: str, days: int, plan_json: str
+    ) -> int:
+        cursor = await self.db.execute(
+            """INSERT INTO meal_plans (user_id, start_date, days, plan_json, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, start_date, days, plan_json, datetime.utcnow().isoformat()),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    async def get_latest_meal_plan(self, user_id: int) -> dict | None:
+        cursor = await self.db.execute(
+            "SELECT * FROM meal_plans WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        plan = dict(row)
+        try:
+            plan["plan"] = json.loads(plan.pop("plan_json"))
+        except (json.JSONDecodeError, KeyError):
+            plan["plan"] = []
+        return plan
+
+    # ── Redeem code operations ──
+
+    async def create_redeem_codes(
+        self, codes: list[str], plan: str, created_by: int, expires_at: str = None
+    ) -> None:
+        await self.db.executemany(
+            """INSERT OR IGNORE INTO redeem_codes
+                   (code, plan, created_by, redeemed_by, redeemed_at, expires_at)
+               VALUES (?, ?, ?, NULL, NULL, ?)""",
+            [(c, plan, created_by, expires_at) for c in codes],
+        )
+        await self.db.commit()
+
+    async def get_redeem_code(self, code: str) -> dict | None:
+        cursor = await self.db.execute(
+            "SELECT * FROM redeem_codes WHERE code = ?", (code,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def mark_code_redeemed(self, code: str, user_id: int) -> None:
+        await self.db.execute(
+            "UPDATE redeem_codes SET redeemed_by = ?, redeemed_at = ? WHERE code = ?",
+            (user_id, datetime.utcnow().isoformat(), code),
+        )
+        await self.db.commit()
 
     # ── Preferences Operations ──
 

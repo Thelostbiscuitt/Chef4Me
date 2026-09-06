@@ -32,6 +32,31 @@ EXPIRY_WARNING_DAYS = int(os.getenv("EXPIRY_WARNING_DAYS", "2"))
 SUGGESTIONS_PER_REQUEST = int(os.getenv("SUGGESTIONS_PER_REQUEST", "6"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+# ── Subscriptions ────────────────────────────────────────────────────────────
+# Telegram user IDs allowed to run /grant, /revoke and /genpass.
+ADMIN_USER_IDS: set[int] = {
+    int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
+}
+
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "7"))
+SUBSCRIPTION_ENABLED = os.getenv("SUBSCRIPTION_ENABLED", "1") == "1"
+
+# Free-tier daily limits (AI calls are the unit of cost)
+FREE_SUGGESTS_PER_DAY = int(os.getenv("FREE_SUGGESTS_PER_DAY", "5"))
+FREE_RECIPES_PER_DAY = int(os.getenv("FREE_RECIPES_PER_DAY", "3"))
+FREE_BULK_ADDS_PER_DAY = int(os.getenv("FREE_BULK_ADDS_PER_DAY", "10"))
+FREE_OCR_PER_MONTH = int(os.getenv("FREE_OCR_PER_MONTH", "3"))
+
+# Premium hard caps (abuse / cost control)
+PREMIUM_SUGGESTS_PER_DAY = int(os.getenv("PREMIUM_SUGGESTS_PER_DAY", "100"))
+PREMIUM_RECIPES_PER_DAY = int(os.getenv("PREMIUM_RECIPES_PER_DAY", "100"))
+PREMIUM_PLANS_PER_DAY = int(os.getenv("PREMIUM_PLANS_PER_DAY", "2"))
+
+# Telegram Stars prices (1 Star ≈ $0.02 USD)
+PRICE_WEEKLY_STARS = int(os.getenv("PRICE_WEEKLY_STARS", "100"))    # ~$1.99
+PRICE_MONTHLY_STARS = int(os.getenv("PRICE_MONTHLY_STARS", "250"))  # ~$4.99
+PRICE_YEARLY_STARS = int(os.getenv("PRICE_YEARLY_STARS", "2000"))   # ~$39.99
+
 # ── Webhook settings ──────────────────────────────────────────────────────────
 # The public HTTPS URL of your Render service, e.g. https://yourbot.onrender.com
 # Render exposes this automatically as the RENDER_EXTERNAL_URL env var.

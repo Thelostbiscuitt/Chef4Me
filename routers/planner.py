@@ -11,7 +11,10 @@ from services.database import DatabaseService
 from services.gemini import GeminiService
 from services.notion_client import NotionService
 from utils.formatters import format_history, format_favorites, format_ingredient_list
-from utils.keyboards import dietary_keyboard, cuisine_keyboard, rating_keyboard, confirm_keyboard
+from utils.keyboards import dietary_keyboard, cuisine_keyboard, rating_keyboard, confirm_keyboard, paywall_keyboard
+
+import config
+import services.subscriptions as subs
 
 logger = logging.getLogger(__name__)
 
@@ -291,9 +294,33 @@ async def cmd_favorites(message: Message):
 #  /shopping
 # ======================================================================
 
+def _flat_shopping_text(items: list[dict], inventory_count: int) -> str:
+    lines = ["Suggested Shopping List\n"]
+    for item in items:
+        lines.append(f"  - {item['name']} -- _{item['reason']}_")
+    lines.append(f"\nYour current inventory has {inventory_count} items.")
+    lines.append("\n💎 Pro organizes this list by supermarket aisle — /subscribe")
+    return "\n".join(lines)
+
+
 @router.message(F.text == "/shopping")
 async def cmd_shopping(message: Message):
     user_id = message.from_user.id
+
+    allowed, used, limit = await subs.check_and_consume(
+        db, user_id, "recipes",
+        free_limit=config.FREE_RECIPES_PER_DAY,
+        premium_limit=config.PREMIUM_RECIPES_PER_DAY,
+    )
+    if not allowed:
+        await message.answer(
+            f"⏳ You've used all {limit} free AI actions for today.\n\n"
+            + await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+
     ingredients = await db.get_ingredients(user_id)
 
     if not ingredients:
@@ -340,17 +367,36 @@ async def cmd_shopping(message: Message):
                 }
             },
             "required": ["shopping_list"],
-        })
+        }, premium=await subs.is_premium(db, user_id))
 
         items = result.get("shopping_list", [])
         if items:
-            lines = ["Suggested Shopping List\n"]
-            for item in items:
-                lines.append(f"  - {item['name']} -- _{item['reason']}_")
-            lines.append(
-                f"\nYour current inventory has {len(ingredients)} items."
-            )
-            text = "\n".join(lines)
+            premium = await subs.is_premium(db, user_id)
+            if premium:
+                organized = await gemini.organize_shopping_list(
+                    [item["name"] for item in items], premium=True
+                )
+                aisles = organized.get("aisles", [])
+                if aisles:
+                    lines = ["🛒 *Smart Shopping List*\n"]
+                    for aisle in aisles:
+                        entries = aisle.get("items", [])
+                        if not entries:
+                            continue
+                        lines.append(f"*{aisle.get('aisle', 'Other')}*")
+                        for it in entries:
+                            q = str(it.get("quantity", "")).strip()
+                            name = str(it.get("name", "?"))
+                            lines.append(f"   • {f'{q} ' if q else ''}{name}")
+                        lines.append("")
+                    lines.append(
+                        f"\nYour current inventory has {len(ingredients)} items."
+                    )
+                    text = "\n".join(lines)
+                else:
+                    text = _flat_shopping_text(items, len(ingredients))
+            else:
+                text = _flat_shopping_text(items, len(ingredients))
         else:
             text = (
                 "Your inventory looks well-stocked -- nothing essential "

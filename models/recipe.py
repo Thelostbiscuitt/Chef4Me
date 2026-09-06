@@ -14,6 +14,14 @@ class RequiredIngredient(BaseModel):
     have: bool = False
 
 
+class Nutrition(BaseModel):
+    """Per-serving nutrition estimate."""
+    calories: Optional[float] = None
+    protein_g: Optional[float] = None
+    carbs_g: Optional[float] = None
+    fat_g: Optional[float] = None
+
+
 class MealSuggestion(BaseModel):
     name: str = Field(..., min_length=1)
     cuisine: str = Field(..., min_length=1)
@@ -24,6 +32,7 @@ class MealSuggestion(BaseModel):
     match_percentage: int = Field(..., ge=0, le=100)
     calories_per_serving: Optional[int] = None
     step_count: Optional[int] = None
+    nutrition: Optional[Nutrition] = None
 
 
 class MealSuggestionsResponse(BaseModel):
@@ -44,6 +53,7 @@ class FullRecipe(BaseModel):
     steps: list[str] = Field(default_factory=list)
     tips: list[str] = Field(default_factory=list)
     calories_per_serving: Optional[int] = None
+    nutrition: Optional[Nutrition] = None
 
 
 class CookedMeal(BaseModel):

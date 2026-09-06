@@ -86,6 +86,10 @@ INSTRUCTIONS (steps array):
 - Include a sensory or visual cue for doneness ("until golden brown", "until the onions are translucent", "until the sauce coats the back of a spoon").
 - Never combine multiple actions in one step.
 
+NUTRITION (nutrition object):
+- Estimate per-serving calories, protein (g), carbs (g) and fat (g).
+- Base the estimate on the ingredient quantities listed above.
+
 TIPS (tips array — minimum 3):
 - One substitution tip (e.g. what to use if a key ingredient is unavailable).
 - One storage/make-ahead tip.
@@ -111,6 +115,7 @@ class GeminiService:
         count: int = 6,
         preferred_cuisines: list[str] = None,
         avoid_cuisines: list[str] = None,
+        premium: bool = True,
     ) -> MealSuggestionsResponse:
         """Generate meal suggestions based on available ingredients."""
         cuisine_constraint = ""
@@ -167,7 +172,7 @@ class GeminiService:
         }
 
         try:
-            response = await self._generate(prompt, schema)
+            response = await self._generate(prompt, schema, premium=premium)
             return MealSuggestionsResponse(
                 suggestions=response.get("suggestions", []),
                 total_ingredients_available=len(ingredients),
@@ -186,6 +191,7 @@ class GeminiService:
         dietary_restrictions: list[str] = None,
         skill_level: str = "beginner",
         servings: int = 2,
+        premium: bool = True,
     ) -> Optional[FullRecipe]:
         """Get a complete detailed recipe for a specific dish."""
         prompt = RECIPE_PROMPT_TEMPLATE.format(
@@ -221,14 +227,23 @@ class GeminiService:
                 },
                 "steps": {"type": "array", "items": {"type": "string"}, "minItems": 8},
                 "tips": {"type": "array", "items": {"type": "string"}, "minItems": 3},
-                "calories_per_serving": {"type": ["integer", "null"]}
+                "calories_per_serving": {"type": ["integer", "null"]},
+                "nutrition": {
+                    "type": "object",
+                    "properties": {
+                        "calories": {"type": "number"},
+                        "protein_g": {"type": "number"},
+                        "carbs_g": {"type": "number"},
+                        "fat_g": {"type": "number"},
+                    },
+                }
             },
             "required": ["name", "cuisine", "description", "difficulty",
                          "cook_time_minutes", "prep_time_minutes", "ingredients", "steps", "tips"]
         }
 
         try:
-            data = await self._generate(prompt, schema)
+            data = await self._generate(prompt, schema, premium=premium)
             return FullRecipe(**data)
         except Exception as e:
             logger.error(f"Failed to get recipe for {recipe_name}: {e}")
@@ -373,20 +388,372 @@ Return the FULL updated list as a JSON array. Only return valid JSON."""
             logger.error(f"Failed to apply correction: {e}")
             return []
 
-    async def _generate(self, prompt: str, response_schema: dict = None) -> dict:
-        """Call the Gemini API with structured output support."""
+    # ── Premium features ─────────────────────────────────────────────────────
+
+    async def generate_meal_plan(
+        self,
+        ingredients: list[str],
+        seasonings: list[str],
+        dietary_restrictions: list[str] = None,
+        allergens: list[str] = None,
+        skill_level: str = "beginner",
+        servings: int = 2,
+        days: int = 7,
+        calories_target: int = None,
+        premium: bool = True,
+    ) -> dict:
+        """Build a multi-day meal plan (breakfast/lunch/dinner + snack)."""
+        calorie_line = (
+            f"Daily calorie target: {calories_target} kcal per day."
+            if calories_target else ""
+        )
+        prompt = f"""Build a {days}-day meal plan, using the ingredients I already
+have as much as possible and minimizing new things to buy.
+
+My available ingredients: {', '.join(ingredients) if ingredients else 'None'}
+My seasonings and condiments: {', '.join(seasonings) if seasonings else 'None'}
+My dietary restrictions: {', '.join(dietary_restrictions) if dietary_restrictions else 'None'}
+My allergens to avoid: {', '.join(allergens) if allergens else 'None'}
+My skill level: {skill_level}
+Servings: {servings}
+{calorie_line}
+
+Rules:
+- Produce exactly {days} days, each with slots: breakfast, lunch, dinner, snack.
+- Vary cuisines across the plan; never repeat a dish.
+- For every meal mark each ingredient have=true if it is in my available list,
+  otherwise have=false with a quantity I need to buy (e.g. "500g chicken thighs").
+- Every ingredient must have an exact quantity string (number + unit).
+- Give realistic difficulty (1-5) and cook_time_minutes for every meal.
+- Include a nutrition estimate per meal (calories, protein_g, carbs_g, fat_g).
+- 1-2 sentences of description per meal.
+
+Respond ONLY with valid JSON matching the schema."""
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "day": {"type": "integer"},
+                            "day_name": {"type": "string"},
+                            "meals": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "slot": {"type": "string"},
+                                        "name": {"type": "string"},
+                                        "cuisine": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "difficulty": {"type": "integer", "minimum": 1, "maximum": 5},
+                                        "cook_time_minutes": {"type": "integer", "minimum": 1},
+                                        "ingredients": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "name": {"type": "string"},
+                                                    "quantity": {"type": "string"},
+                                                    "have": {"type": "boolean"},
+                                                },
+                                                "required": ["name", "have"],
+                                            },
+                                        },
+                                        "nutrition": {
+                                            "type": "object",
+                                            "properties": {
+                                                "calories": {"type": "number"},
+                                                "protein_g": {"type": "number"},
+                                                "carbs_g": {"type": "number"},
+                                                "fat_g": {"type": "number"},
+                                            },
+                                        },
+                                    },
+                                    "required": ["slot", "name", "cuisine", "description",
+                                                 "difficulty", "cook_time_minutes",
+                                                 "ingredients"],
+                                },
+                            },
+                        },
+                        "required": ["day", "day_name", "meals"],
+                    },
+                },
+            },
+            "required": ["plan"],
+        }
+
+        try:
+            return await self._generate(
+                prompt, schema, premium=premium, max_output_tokens=16384
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate meal plan: {e}")
+            return {"plan": []}
+
+    async def organize_shopping_list(
+        self, items: list[str], premium: bool = True
+    ) -> dict:
+        """Group shopping items by supermarket aisle and merge duplicates."""
+        prompt = f"""Here is a shopping list of kitchen ingredients:
+{json.dumps(items, ensure_ascii=False)}
+
+Organize it for a supermarket trip:
+- Merge duplicate/similar items (e.g. two entries of chicken thighs) into one
+  entry with a combined quantity (e.g. "1 kg chicken thighs").
+- Group items by aisle. Use these aisles only: Produce, Dairy & Eggs,
+  Meat & Fish, Bakery, Pantry & Dry Goods, Spices & Sauces, Frozen, Household.
+- Keep quantities exact and combined.
+Return ONLY valid JSON matching the schema."""
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "aisles": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "aisle": {"type": "string"},
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "quantity": {"type": "string"},
+                                    },
+                                    "required": ["name"],
+                                },
+                            },
+                        },
+                        "required": ["aisle", "items"],
+                    },
+                },
+            },
+            "required": ["aisles"],
+        }
+
+        try:
+            return await self._generate(prompt, schema, premium=premium)
+        except Exception as e:
+            logger.error(f"Failed to organize shopping list: {e}")
+            return {"aisles": []}
+
+    async def use_up_recipes(
+        self, expiring: list[str], premium: bool = True
+    ) -> list[dict]:
+        """2 quick recipes that use ingredients expiring soon."""
+        prompt = f"""These ingredients in my kitchen are about to expire:
+{', '.join(expiring)}
+
+Suggest exactly 2 quick meals that use as many of them as possible, with
+minimal extra ingredients. For each give:
+- name, description (1-2 sentences), match_percentage (0-100),
+- ingredients: list with name and have (true only if it is one of the
+  expiring items above, otherwise false).
+
+Respond ONLY with valid JSON: an array of meal objects."""
+
+        schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "match_percentage": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "ingredients": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "have": {"type": "boolean"},
+                            },
+                            "required": ["name", "have"],
+                        },
+                    },
+                },
+                "required": ["name", "description"],
+            },
+        }
+
+        try:
+            result = await self._generate(prompt, schema, premium=premium)
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            logger.error(f"Failed to get use-up recipes: {e}")
+            return []
+
+    async def scale_recipe(
+        self, recipe_name: str, ingredients: list[str], factor: float,
+        premium: bool = True,
+    ) -> dict:
+        """Scale every ingredient quantity in a recipe by `factor`."""
+        prompt = f"""Recipe: {recipe_name}
+Current ingredient list:
+{json.dumps(ingredients, ensure_ascii=False)}
+
+Scale EVERY ingredient quantity by exactly {factor}x. Keep units, and give the
+scaled quantity as a clean number (e.g. 500g x 2 = 1kg, 2 tbsp x 0.5 = 1 tbsp).
+Return a JSON object with an 'ingredients' array; each item has 'name' (the
+ingredient without its quantity) and 'quantity' (scaled number + unit)."""
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "ingredients": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "quantity": {"type": "string"},
+                        },
+                        "required": ["name", "quantity"],
+                    },
+                },
+            },
+            "required": ["ingredients"],
+        }
+
+        try:
+            return await self._generate(prompt, schema, premium=premium)
+        except Exception as e:
+            logger.error(f"Failed to scale recipe: {e}")
+            return {"ingredients": []}
+
+    async def leftover_recipes(
+        self, leftover: str, ingredients: list[str], seasonings: list[str],
+        premium: bool = True,
+    ) -> list[dict]:
+        """3 recipes built around a specific leftover ingredient."""
+        prompt = f"""I have leftover: {leftover}
+Also available: {', '.join(ingredients) if ingredients else 'None'}
+Seasonings: {', '.join(seasonings) if seasonings else 'None'}
+
+Suggest exactly 3 meals that use the leftover as the main ingredient, and
+minimize extra shopping. For each give: name, cuisine, description (1-2
+sentences), difficulty (1-5), cook_time_minutes, match_percentage (0-100),
+and ingredients (name + have; have=true only if the ingredient is the leftover
+or in my available list).
+
+Respond ONLY with valid JSON: an array of meal objects."""
+
+        schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "cuisine": {"type": "string"},
+                    "description": {"type": "string"},
+                    "difficulty": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "cook_time_minutes": {"type": "integer", "minimum": 1},
+                    "match_percentage": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "ingredients": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "have": {"type": "boolean"},
+                            },
+                            "required": ["name", "have"],
+                        },
+                    },
+                },
+                "required": ["name", "cuisine", "description"],
+            },
+        }
+
+        try:
+            result = await self._generate(prompt, schema, premium=premium)
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            logger.error(f"Failed to get leftover recipes: {e}")
+            return []
+
+    async def substitutes(self, ingredient: str, premium: bool = True) -> list[dict]:
+        """Cooking substitutes for a missing ingredient."""
+        prompt = f"""I'm out of: {ingredient}
+
+Give me exactly 3 practical cooking substitutes. For each: 'substitute' (name),
+'ratio' (how much to use to replace the original, e.g. "1 egg = 1/4 cup"),
+and 'notes' (how it changes taste/texture).
+
+Respond ONLY with valid JSON: an array of substitute objects."""
+
+        schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "substitute": {"type": "string"},
+                    "ratio": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["substitute", "ratio", "notes"],
+            },
+        }
+
+        try:
+            result = await self._generate(prompt, schema, premium=premium)
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            logger.error(f"Failed to get substitutes: {e}")
+            return []
+
+    async def transcribe_voice(
+        self, audio_bytes: bytes, mime_type: str = "audio/ogg",
+        premium: bool = True,
+    ) -> str:
+        """Transcribe a Telegram voice note to text."""
+        model = self.model if premium else self.fallback_model
+        part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+        prompt = (
+            "Transcribe this voice note. Return only the spoken words, with "
+            "punctuation. It is a list of kitchen ingredients or groceries."
+        )
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=model,
+                contents=[prompt, part],
+                config=GenerateContentConfig(temperature=0),
+            )
+            return (response.text or "").strip()
+        except Exception as e:
+            logger.error(f"Failed to transcribe voice note: {e}")
+            return ""
+
+    async def _generate(
+        self, prompt: str, response_schema: dict = None,
+        premium: bool = True, max_output_tokens: int = 8192,
+    ) -> dict:
+        """Call the Gemini API with structured output support.
+
+        Free-tier users get the lighter (cheaper) model; premium get the
+        main model. Failures fall back to the other model automatically.
+        """
         gen_config = GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             temperature=0.7,
-            max_output_tokens=8192,
+            max_output_tokens=max_output_tokens,
         )
         if response_schema:
             gen_config.response_mime_type = "application/json"
             gen_config.response_schema = response_schema
 
+        model = self.model if premium else self.fallback_model
+        fallback_model = self.fallback_model if premium else self.model
+
         try:
             response = await self.client.aio.models.generate_content(
-                model=self.model,
+                model=model,
                 contents=prompt,
                 config=gen_config,
             )
@@ -402,7 +769,7 @@ Return the FULL updated list as a JSON array. Only return valid JSON."""
             logger.warning(f"Primary model failed ({primary_error}), trying fallback...")
             try:
                 response = await self.client.aio.models.generate_content(
-                    model=self.fallback_model,
+                    model=fallback_model,
                     contents=prompt,
                     config=gen_config,
                 )

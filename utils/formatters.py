@@ -106,7 +106,7 @@ def format_meal_suggestion(suggestion: dict, index: int) -> str:
     return "\n".join(lines)
 
 
-def format_full_recipe(recipe: dict) -> str:
+def format_full_recipe(recipe: dict, premium: bool = False) -> str:
     """Format a complete recipe for Telegram."""
     from data.cuisines import CUISINE_EMOJIS
 
@@ -155,6 +155,28 @@ def format_full_recipe(recipe: dict) -> str:
 
     if recipe.get("calories_per_serving"):
         lines.append(f"\n🔥 ~{recipe['calories_per_serving']} calories per serving")
+
+    nutrition = recipe.get("nutrition") or {}
+    if nutrition.get("calories"):
+        if premium:
+            def _g(v):
+                try:
+                    return f"{float(v):.0f}g"
+                except (TypeError, ValueError):
+                    return None
+            parts = [f"{float(nutrition['calories']):.0f} kcal"]
+            protein = _g(nutrition.get("protein_g"))
+            carbs = _g(nutrition.get("carbs_g"))
+            fat = _g(nutrition.get("fat_g"))
+            if protein:
+                parts.append(f"{protein} protein")
+            if carbs:
+                parts.append(f"{carbs} carbs")
+            if fat:
+                parts.append(f"{fat} fat")
+            lines.append(f"\n🥗 *Nutrition (per serving):* {' · '.join(parts)}")
+        else:
+            lines.append("\n🥗 Nutrition: 💎 Pro feature — /subscribe")
 
     return "\n".join(lines)
 

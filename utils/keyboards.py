@@ -153,3 +153,57 @@ def expiry_keyboard(expiring: list[dict]) -> InlineKeyboardMarkup:
     if buttons:
         buttons.append([InlineKeyboardButton(text="❌ Close", callback_data="close")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+def paywall_keyboard() -> InlineKeyboardMarkup:
+    """Upsell keyboard shown when a premium feature is blocked."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 Upgrade — see plans", callback_data="sub_pricing")],
+        [InlineKeyboardButton(text="🆓 What's free", callback_data="sub_free")],
+        [InlineKeyboardButton(text="❌ Close", callback_data="close")],
+    ])
+
+
+def subscribe_keyboard() -> InlineKeyboardMarkup:
+    """Plan selection keyboard (Telegram Stars)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Weekly — $1.99", callback_data="sub_plan:weekly")],
+        [InlineKeyboardButton(text="📆 Monthly — $4.99", callback_data="sub_plan:monthly")],
+        [InlineKeyboardButton(text="💰 Yearly — $39.99", callback_data="sub_plan:yearly")],
+        [InlineKeyboardButton(text="🆓 What's free", callback_data="sub_free")],
+        [InlineKeyboardButton(text="❌ Close", callback_data="close")],
+    ])
+
+
+def plan_days_keyboard() -> InlineKeyboardMarkup:
+    """Days picker for the weekly meal planner."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="3 days", callback_data="plan_days:3"),
+         InlineKeyboardButton(text="5 days", callback_data="plan_days:5"),
+         InlineKeyboardButton(text="7 days", callback_data="plan_days:7")],
+        [InlineKeyboardButton(text="❌ Cancel", callback_data="plan_close")],
+    ])
+
+
+def plan_nav_keyboard(day_idx: int, total_days: int) -> InlineKeyboardMarkup:
+    """Day navigation + actions for the meal planner."""
+    row = []
+    if day_idx > 0:
+        row.append(InlineKeyboardButton(text="◀ Prev day", callback_data=f"plan_day:{day_idx - 1}"))
+    if day_idx < total_days - 1:
+        row.append(InlineKeyboardButton(text="Next day ▶", callback_data=f"plan_day:{day_idx + 1}"))
+    buttons = []
+    if row:
+        buttons.append(row)
+    buttons.append([
+        InlineKeyboardButton(text="🛒 Shopping list", callback_data="plan_shop"),
+        InlineKeyboardButton(text="🔄 Regenerate", callback_data="plan_regen"),
+    ])
+    buttons.append([InlineKeyboardButton(text="❌ Close", callback_data="plan_close")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def scale_keyboard() -> InlineKeyboardMarkup:
+    """Recipe scaling buttons (premium)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{f}x", callback_data=f"scale:{f}")
+         for f in (1, 2, 3, 4)],
+    ])

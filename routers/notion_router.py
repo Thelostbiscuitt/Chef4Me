@@ -9,7 +9,8 @@ from aiogram.fsm.state import State, StatesGroup
 
 from services.database import DatabaseService
 from services.notion_client import NotionService
-from utils.keyboards import confirm_keyboard
+import services.subscriptions as subs
+from utils.keyboards import confirm_keyboard, paywall_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,15 @@ async def cmd_notion(message: Message):
         return
 
     user_id = message.from_user.id
+
+    if not await subs.is_premium(db, user_id):
+        await message.answer(
+            await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+
     prefs = await db.get_preferences(user_id)
     has_token = bool(prefs.get("notion_token")) or (notion_svc and notion_svc.is_available)
     has_db = bool(prefs.get("notion_database_id"))
@@ -163,6 +173,15 @@ async def _do_sync(message: Message):
         return
 
     user_id = message.from_user.id
+
+    if not await subs.is_premium(db, user_id):
+        await message.answer(
+            await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+
     client = await _effective_notion(user_id)
 
     if not client or not client.is_available:
@@ -235,6 +254,15 @@ async def cb_notion_setup(callback: CallbackQuery, state: FSMContext):
 
 async def _start_setup(message: Message, state: FSMContext = None):
     """Begin the multi-step setup flow."""
+    user_id = message.from_user.id
+    if not await subs.is_premium(db, user_id):
+        await message.answer(
+            await subs.paywall_text(db, user_id),
+            parse_mode="Markdown",
+            reply_markup=paywall_keyboard(),
+        )
+        return
+
     if state:
         await state.clear()
 
