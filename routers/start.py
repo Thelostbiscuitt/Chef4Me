@@ -13,6 +13,7 @@ HELP_TEXT = """\
 /add — Add an ingredient (interactive flow)
 /add chicken, rice, eggs — Add a whole list at once (AI-parsed)
 /add bulk — Bulk-add mode: send a sentence or list, however you like
+/addbulk — Same as /add bulk (paste your shopping list straight in)
 📸 Send a photo of a receipt, shopping list or fridge — I'll extract the items
 /remove — Remove an ingredient from inventory
 /inventory — View your current ingredients

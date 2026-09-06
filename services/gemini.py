@@ -253,15 +253,27 @@ class GeminiService:
         """Parse a text list of ingredients into structured data."""
         prompt = f"""Parse this text into a list of kitchen ingredients. The text may be a
 plain list, a shopping list, or a casual sentence (e.g. "I bought 2kg of
-chicken, a dozen eggs and some rice yesterday"). For each ingredient extract:
-- name: the ingredient name (normalized, singular form)
-- quantity: the amount as a number, or null if the amount is not explicitly
-  stated in the text. NEVER guess or invent an amount — if the text doesn't say
-  how much, use null and the user will be asked. Exceptions where a number IS
-  stated in words: "a dozen" = 12, "a couple" = 2, "half a litre" = 0.5,
-  "a pinch" = 1.
+chicken, a dozen eggs and some rice yesterday"). It may contain brand names
+and packaging descriptions — this is normal grocery shopping language.
+For each ingredient extract:
+- name: the ingredient name (normalized, singular form). Brand names and pack
+  sizes are part of the name and must be kept, e.g. "1 carton of Indomie
+  noodles chicken flavour 70g small size" → name "indomie noodles chicken
+  flavour 70g"; "5 500g golden penny twist pasta" → name "golden penny twist
+  pasta 500g"; "1 5kg bag of Basmati rice" → name "basmati rice 5kg".
+- quantity: the amount of items/packages as a number, or null if the amount is
+  not explicitly stated in the text. NEVER guess or invent an amount — if the
+  text doesn't say how much, use null and the user will be asked. Exceptions
+  where a number IS stated in words: "a dozen" = 12, "a couple" = 2,
+  "half a litre" = 0.5, "a pinch" = 1.
 - unit: one of g, kg, ml, L, pcs, cups, tbsp, tsp, lb, oz, bunches, cloves, whole.
-  Use pcs for countable items. If quantity is null, still give the most likely
+  Container and packaging words (carton, sachet, bag, bottle, pack, tin,
+  "paint plastic") describe how many items were bought — map them to "pcs" and
+  keep the pack size in the name. Examples: "10 sachets of Gino pepper and
+  onions tomato paste" → quantity 10, unit "pcs", name "gino pepper and onions
+  tomato paste"; "1 625ml bottle of sesame oil" → quantity 1, unit "pcs",
+  name "sesame oil 625ml". For loose quantities ("2kg of chicken") use the
+  weight/volume unit instead. If quantity is null, still give the most likely
   unit for this ingredient (it will be shown as a hint when the user is asked).
 - category: one of protein, vegetable, grain, dairy, spice, sauce, oil, fruit, beverage, other
 - expiry_hint: ONLY if the text mentions expiry/freshness for that item

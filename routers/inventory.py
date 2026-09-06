@@ -41,13 +41,25 @@ db: DatabaseService = None  # type: ignore[assignment]
 gemini: GeminiService = None  # type: ignore[assignment]
 
 
+def _looks_like_list(text: str) -> bool:
+    """Heuristic: does this text look like a multi-item list or a chatty
+    sentence rather than a single ingredient name?"""
+    lowered = text.lower()
+    return (
+        "," in text
+        or "\n" in text
+        or len(text.split()) >= 5
+        or lowered.startswith(("i bought", "bought", "i have", "i got", "we bought", "got "))
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # /add  — single ingredient
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.message(F.text.lower().startswith("/add"))
 async def cmd_add(message: Message, state: FSMContext):
-    """Entry point for /add or /add bulk."""
+    """Entry point for /add or /add bulk (also /addbulk, /add_bulk, /add-bulk)."""
     # Ensure user is registered
     if db:
         await db.register_user(
@@ -59,28 +71,35 @@ async def cmd_add(message: Message, state: FSMContext):
 
     text = message.text or ""
     parts = text.split(maxsplit=1)
-    subcommand = parts[1].strip().lower() if len(parts) > 1 else ""
+    command_word = parts[0].lower().lstrip("/")
+    argument = parts[1].strip() if len(parts) > 1 else ""
+    subcommand = argument.lower()
 
-    if subcommand == "bulk":
-        await _start_bulk_add(message, state)
+    # "/add bulk", "/addbulk", "/add_bulk" and "/add-bulk" all enter bulk mode
+    if (subcommand == "bulk" or subcommand.startswith("bulk ")
+            or command_word in ("addbulk", "add_bulk", "add-bulk")):
+        list_argument = ""
+        if subcommand.startswith("bulk"):
+            list_argument = argument[4:].strip()  # strip the leading "bulk"
+        elif argument:
+            # e.g. "/addbulk chicken, rice, eggs" — the argument is the list
+            list_argument = argument
+        if list_argument:
+            await state.set_state(BulkAddStates.waiting_for_bulk_input)
+            await _parse_and_present(message, state, list_argument)
+        else:
+            await _start_bulk_add(message, state)
         return
 
     # ── Single /add ──────────────────────────────────────────────────────────
-    ingredient_input = parts[1].strip() if len(parts) > 1 else ""
+    ingredient_input = argument
 
     if ingredient_input:
         # Lists (commas/newlines) and chatty sentences go straight to the
         # AI bulk parser — one command handles both one-by-one and lists.
-        lowered = ingredient_input.lower()
-        looks_like_list = (
-            "," in ingredient_input
-            or "\n" in ingredient_input
-            or len(ingredient_input.split()) >= 5
-            or lowered.startswith(("i bought", "bought", "i have", "i got", "we bought", "got "))
-        )
-        if looks_like_list:
+        if _looks_like_list(ingredient_input):
             await state.set_state(BulkAddStates.waiting_for_bulk_input)
-            await on_bulk_input(message, state)
+            await _parse_and_present(message, state, ingredient_input)
             return
 
         # Single ingredient — an inline amount like "/add 500g flour" or
@@ -138,6 +157,11 @@ async def on_quantity_input(message: Message, state: FSMContext):
 
     # If we already have a name, this message should be the count.
     if "ingredient_name" in data:
+        if _looks_like_list(raw):
+            # They pasted a whole new list instead of a count — bulk-add it.
+            await state.set_state(BulkAddStates.waiting_for_bulk_input)
+            await _parse_and_present(message, state, raw)
+            return
         count = _parse_count(raw)
         if count is None or count <= 0:
             await message.answer(
@@ -159,6 +183,12 @@ async def on_quantity_input(message: Message, state: FSMContext):
         # First message is the ingredient name.
         if not raw:
             await message.answer("Please send a valid ingredient name.")
+            return
+
+        if _looks_like_list(raw):
+            # A whole shopping list pasted as the "name" — bulk-add it.
+            await state.set_state(BulkAddStates.waiting_for_bulk_input)
+            await _parse_and_present(message, state, raw)
             return
 
         normalized = normalize_name(raw)
@@ -387,6 +417,25 @@ async def on_bulk_input(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    raw_text = message.text.strip()
+    if not raw_text:
+        await message.answer("Please send a non-empty list of ingredients.")
+        return
+
+    # Strip a leading command ("/addbulk …", "/add …") so the AI only sees
+    # the ingredient list itself.
+    if raw_text.startswith("/"):
+        pieces = raw_text.split(None, 1)
+        raw_text = pieces[1].strip() if len(pieces) > 1 else ""
+    if not raw_text:
+        await message.answer("Please send a non-empty list of ingredients.")
+        return
+
+    await _parse_and_present(message, state, raw_text)
+
+
+async def _parse_and_present(message: Message, state: FSMContext, raw_text: str):
+    """Shared bulk-add pipeline: quota → AI parse → confirmation card."""
     if db is not None:
         allowed, used, limit = await subs.check_and_consume(
             db, message.from_user.id, "bulk_adds",
@@ -401,11 +450,6 @@ async def on_bulk_input(message: Message, state: FSMContext):
             )
             await state.clear()
             return
-
-    raw_text = message.text.strip()
-    if not raw_text:
-        await message.answer("Please send a non-empty list of ingredients.")
-        return
 
     processing_msg = await message.answer("🤖 Parsing your ingredient list with AI…")
 
