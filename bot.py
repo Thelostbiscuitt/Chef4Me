@@ -80,7 +80,7 @@ async def on_startup(bot: Bot) -> None:
     logger.info("Notion integration: %s.", notion_status)
 
     # ── Initialize scheduler ──────────────────────────────────────────────────
-    scheduler_service = SchedulerService(db=db_service, bot=bot)
+    scheduler_service = SchedulerService(db=db_service, bot=bot, gemini=gemini_service)
     scheduler_service.start()
     logger.info("Scheduler started.")
 
@@ -114,6 +114,13 @@ async def on_startup(bot: Bot) -> None:
 
     notion_router.db = db_service
     notion_router.notion_svc = notion_service
+
+    import routers.subscribe as subscribe_router
+    import routers.plan as plan_router
+
+    subscribe_router.db = db_service
+    plan_router.db = db_service
+    plan_router.gemini = gemini_service
 
     logger.info("All services wired. Bot is ready!")
 
@@ -166,12 +173,16 @@ def main() -> None:
     from routers.suggest import router as suggest_router
     from routers.planner import router as planner_router
     from routers.notion_router import router as notion_router
+    from routers.subscribe import router as subscribe_router
+    from routers.plan import router as plan_router
 
     dp.include_router(start_router)
     dp.include_router(inventory_router)
     dp.include_router(suggest_router)
     dp.include_router(planner_router)
     dp.include_router(notion_router)
+    dp.include_router(subscribe_router)
+    dp.include_router(plan_router)
 
     # ── Local polling mode ─────────────────────────────────────────────────────
     # Same dispatcher, same routers, same startup/shutdown hooks — only the
